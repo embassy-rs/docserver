@@ -88,7 +88,7 @@ impl Tree {
         NodeId(self.next_id)
     }
 
-    pub fn pack(&mut self, path: &Path, config: &PackConfig) -> io::Result<NodeId> {
+    pub fn pack(&mut self, path: &Path, config: &PackConfig) -> io::Result<Option<NodeId>> {
         let path = path.canonicalize()?;
 
         let m = fs::metadata(&path)?;
@@ -102,10 +102,14 @@ impl Tree {
                     continue;
                 }
 
-                let node_id = self.pack(&child, config)?;
+                let Some(node_id) = self.pack(&child, config)? else {
+                    continue
+                };
                 let name = entry.file_name().to_string_lossy().to_string();
-
                 entries.push(DirectoryEntry { name, node_id });
+            }
+            if entries.is_empty() {
+                return Ok(None);
             }
             entries.sort_by(|a, b| a.name.cmp(&b.name));
             Node::Directory(Directory { entries })
@@ -117,7 +121,7 @@ impl Tree {
             panic!("unknown type {:?} {:?}", path, m);
         };
 
-        Ok(self.add_node(node))
+        Ok(Some(self.add_node(node)))
     }
 
     pub fn add_node(&mut self, node: Node) -> NodeId {
