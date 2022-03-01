@@ -1,10 +1,8 @@
 use memmap2::Mmap;
 use std::borrow::Cow;
-
 use std::cell::Cell;
 use std::fs;
 use std::io::{self, Read};
-use std::iter::from_fn;
 use std::ops::Deref;
 use std::path::Path;
 use std::str;
@@ -109,12 +107,24 @@ pub enum Node<'a> {
     Directory(Directory<'a>),
 }
 
+impl<'a> Node<'a> {
+    pub fn node(&self) -> layout::Node {
+        match self {
+            Self::File(n) => n.node(),
+            Self::Directory(n) => n.node(),
+        }
+    }
+}
+
 pub struct File<'a> {
     reader: &'a Reader,
     node: layout::Node,
 }
 
 impl<'a> File<'a> {
+    pub fn node(&self) -> layout::Node {
+        self.node
+    }
     pub fn read(&self) -> io::Result<Cow<'a, [u8]>> {
         self.reader.read_node(self.node)
     }
@@ -126,6 +136,10 @@ pub struct Directory<'a> {
 }
 
 impl<'a> Directory<'a> {
+    pub fn node(&self) -> layout::Node {
+        self.node
+    }
+
     pub fn children(&self) -> io::Result<Vec<(String, Node<'a>)>> {
         let data = self.reader.read_node(self.node).unwrap();
         let data = ByteReader::new(&data);

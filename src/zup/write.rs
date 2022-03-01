@@ -73,6 +73,16 @@ impl Tree {
         self.nodes.len()
     }
 
+    pub fn total_bytes(&self) -> usize {
+        self.nodes
+            .iter()
+            .map(|(_, n)| match n {
+                Node::File(f) => f.data.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
     pub fn gen_id(&mut self) -> NodeId {
         self.next_id += 1;
         NodeId(self.next_id)

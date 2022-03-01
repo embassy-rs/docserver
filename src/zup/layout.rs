@@ -1,7 +1,7 @@
 pub const FLAG_COMPRESSED: u32 = 1;
 pub const FLAG_DIR: u32 = 2;
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub struct Range {
     pub offset: u64,
     pub len: u64,
@@ -23,7 +23,7 @@ impl Range {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub struct Node {
     pub flags: u32,
     pub range: Range,
