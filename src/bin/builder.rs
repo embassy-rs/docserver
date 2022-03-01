@@ -1,14 +1,17 @@
 #![feature(io_error_more)]
+#![feature(let_else)]
 
-use std::env::{self, args};
+use std::borrow::Cow;
+use std::env::{self};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{self, Command};
 use std::sync::Mutex;
 use std::{fs, io};
 
 use crossbeam::channel::unbounded;
 use crossbeam::thread;
+use regex::bytes::Regex as ByteRegex;
 use regex::Regex;
 
 #[path = "../zup/mod.rs"]
@@ -58,9 +61,23 @@ mod manifest {
 }
 
 fn pack_config() -> PackConfig {
+    // Remove srclinks that point to a file starting with `_`.
+    let re = ByteRegex::new("<a class=\"srclink\" href=\"[^\"]*/_[^\"]*\">source</a>").unwrap();
     PackConfig {
-        file_filter: Box::new(|path| !path.ends_with("!.html")),
-        data_filter: Box::new(|path, data| {}),
+        file_filter: Box::new(|path| {
+            path.file_name().map_or(true, |f| {
+                f != "implementors"
+                    && !f.to_str().unwrap().starts_with('_')
+                    && !path.ends_with("!.html")
+            })
+        }),
+        data_filter: Box::new(move |path, data| {
+            if path.to_str().unwrap().ends_with(".html") {
+                if let Cow::Owned(mut res) = re.replace_all(data, &[][..]) {
+                    std::mem::swap(&mut res, data);
+                }
+            }
+        }),
     }
 }
 
@@ -120,14 +137,14 @@ fn main() -> io::Result<()> {
 
     thread::scope(|s| {
         // Spawn workers
-        for i in 0..12 {
+        for i in 0..6 {
             let j = i;
             let rx = &rx;
             let manifest_path = &manifest_path;
             let m = &m;
             s.spawn(move |_| {
                 let pack_config = pack_config();
-                let target_dir = format!("target/work{}", j);
+                let target_dir = format!("target_doc/work{}", j);
 
                 while let Ok(flavor) = rx.recv() {
                     println!("documenting {:?} ...", flavor);
@@ -149,7 +166,7 @@ fn main() -> io::Result<()> {
                         "-Z",
                         "unstable-options",
                         "--static-root-path",
-                        "/static/",
+                        "/static-v1/",
                     ]);
 
                     let output = cmd.output().expect("failed to execute process");
@@ -169,7 +186,7 @@ fn main() -> io::Result<()> {
                         process::exit(1);
                     }
 
-                    let dir = tree.pack(&doc_dir, &pack_config).unwrap();
+                    let dir = tree.pack(&doc_dir, &pack_config).unwrap().unwrap();
                     root.push(DirectoryEntry {
                         name: flavor.name.clone(),
                         node_id: dir,
@@ -180,7 +197,14 @@ fn main() -> io::Result<()> {
     })
     .unwrap();
 
+    if let Some(p) = output_path.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+
+    println!("total nodes: {}", tree.node_count());
+    println!("total bytes: {}", tree.total_bytes());
     println!("compressing...");
+
     let root = Node::Directory(Directory { entries: root });
     let root = tree.add_node(root);
     tree.write(&output_path, root)?;
