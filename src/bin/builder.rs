@@ -47,7 +47,10 @@ mod manifest {
 
     #[derive(Deserialize)]
     pub struct DocsFlavor {
-        pub regex_feature: String,
+        // One of either has to be specified
+        pub regex_feature: Option<String>,
+        pub name: Option<String>,
+
         #[serde(default)]
         pub features: Vec<String>,
         pub target: String,
@@ -84,13 +87,25 @@ fn main() -> io::Result<()> {
 
     let mut flavors = Vec::new();
     for rule in &docs.flavors {
-        let re = Regex::new(&format!("^{}$", rule.regex_feature)).unwrap();
-        for feature in manifest.features.keys().filter(|s| re.is_match(s)) {
-            let mut features = docs.features.clone();
+        let mut name_feats: Vec<(String, Vec<String>)> = Vec::new();
+        match (&rule.name, &rule.regex_feature) {
+            (Some(name), None) => name_feats.push((name.clone(), vec![])),
+            (None, Some(re)) => {
+                let re = Regex::new(&format!("^{}$", re)).unwrap();
+                for feature in manifest.features.keys().filter(|s| re.is_match(s)) {
+                    name_feats.push((feature.clone(), vec![feature.clone()]))
+                }
+            }
+            _ => panic!(
+                "Invalid flavor: Exactly one of `name` or `regex_feature` has to be specified."
+            ),
+        }
+
+        for (name, mut features) in name_feats {
+            features.extend_from_slice(&docs.features);
             features.extend_from_slice(&rule.features);
-            features.push(feature.clone());
             flavors.push(Flavor {
-                name: feature.clone(),
+                name,
                 features,
                 target: rule.target.clone(),
             })
