@@ -14,55 +14,37 @@ use crossbeam::thread;
 use regex::bytes::Regex as ByteRegex;
 use regex::Regex;
 
+#[path = "../manifest.rs"]
+mod manifest;
 #[path = "../zup/mod.rs"]
 mod zup;
+
 use zup::write::*;
 
-mod manifest {
-    use serde::Deserialize;
-    use std::collections::HashMap;
+fn pack_config(crate_name: &str) -> PackConfig {
+    let crate_name = crate_name.replace('-', "_");
 
-    #[derive(Deserialize)]
-    pub struct Manifest {
-        pub features: HashMap<String, Vec<String>>,
-        pub package: Package,
-    }
+    // Remove settings button (it breaks due to the path rewriting, we'll provide our own version)
+    let re_remove_settings = ByteRegex::new("<a id=\"settings-menu\".*?</a>").unwrap();
 
-    #[derive(Deserialize)]
-    pub struct Package {
-        #[serde(default)]
-        pub metadata: Metadata,
-    }
-
-    #[derive(Deserialize, Default)]
-    pub struct Metadata {
-        #[serde(default)]
-        pub embassy_docs: Docs,
-    }
-
-    #[derive(Deserialize, Default)]
-    pub struct Docs {
-        #[serde(default)]
-        pub flavors: Vec<DocsFlavor>,
-        #[serde(default)]
-        pub features: Vec<String>,
-    }
-
-    #[derive(Deserialize)]
-    pub struct DocsFlavor {
-        // One of either has to be specified
-        pub regex_feature: Option<String>,
-        pub name: Option<String>,
-
-        #[serde(default)]
-        pub features: Vec<String>,
-        pub target: String,
-    }
-}
-
-fn pack_config() -> PackConfig {
     // Remove srclinks that point to a file starting with `_`.
-    let re = ByteRegex::new("<a class=\"srclink\" href=\"[^\"]*/_[^\"]*\">source</a>").unwrap();
+    let re_remove_hidden_src =
+        ByteRegex::new("<a class=\"srclink\" href=\"[^\"]*/_[^\"]*\">source</a>").unwrap();
+
+    // Rewrite srclinks from `../../crate_name/foo" to "/__DOCSERVER_SRCLINK/foo".
+    let re_rewrite_src = ByteRegex::new(&format!(
+        "<a class=\"srclink\" href=\"(\\.\\./)+src/{}",
+        &crate_name
+    ))
+    .unwrap();
+
+    // Remove crates.js
+    let re_remove_cratesjs =
+        ByteRegex::new("<script src=\"(\\.\\./)+crates.js\"></script>").unwrap();
+
+    // Rewrite links from `../crate_name" to "".
+    let re_rewrite_root = ByteRegex::new(&format!("\\.\\./{}/", &crate_name)).unwrap();
+
     PackConfig {
         file_filter: Box::new(|path| {
             path.file_name().map_or(true, |f| {
@@ -73,9 +55,18 @@ fn pack_config() -> PackConfig {
         }),
         data_filter: Box::new(move |path, data| {
             if path.to_str().unwrap().ends_with(".html") {
-                if let Cow::Owned(mut res) = re.replace_all(data, &[][..]) {
-                    std::mem::swap(&mut res, data);
-                }
+                let res = &data;
+                let res = re_remove_settings.replace_all(&res, &[][..]).into_owned();
+                let res = re_remove_hidden_src.replace_all(&res, &[][..]).into_owned();
+                let res = re_remove_cratesjs.replace_all(&res, &[][..]).into_owned();
+                let res = re_rewrite_src
+                    .replace_all(
+                        &res,
+                        &b"<a class=\"srclink\" href=\"/__DOCSERVER_SRCLINK"[..],
+                    )
+                    .into_owned();
+                let res = re_rewrite_root.replace_all(&res, &[][..]).into_owned();
+                *data = res;
             }
         }),
     }
@@ -89,17 +80,17 @@ struct Flavor {
 }
 
 fn main() -> io::Result<()> {
-    let mut tree = zup::write::Tree::new();
-    let mut root = Vec::new();
+    let mut zup_tree = zup::write::Tree::new();
+    let mut zup_flavors = Vec::new();
 
     let args: Vec<_> = env::args().collect();
     let manifest_path = PathBuf::from(&args[1]);
     let output_path = PathBuf::from(&args[2]);
 
-    let m = Mutex::new((&mut tree, &mut root));
+    let m = Mutex::new((&mut zup_tree, &mut zup_flavors));
 
-    let manifest: manifest::Manifest =
-        toml::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let manifest_bytes = fs::read(&manifest_path).unwrap();
+    let manifest: manifest::Manifest = toml::from_slice(&manifest_bytes).unwrap();
     let docs = &manifest.package.metadata.embassy_docs;
 
     let mut flavors = Vec::new();
@@ -142,8 +133,9 @@ fn main() -> io::Result<()> {
             let rx = &rx;
             let manifest_path = &manifest_path;
             let m = &m;
+            let crate_name = &manifest.package.name;
             s.spawn(move |_| {
-                let pack_config = pack_config();
+                let pack_config = pack_config(crate_name);
                 let target_dir = format!("target_doc/work{}", j);
 
                 while let Ok(flavor) = rx.recv() {
@@ -166,12 +158,12 @@ fn main() -> io::Result<()> {
                         "-Z",
                         "unstable-options",
                         "--static-root-path",
-                        "/static-v1/",
+                        "/__DOCSERVER_STATIC/",
                     ]);
 
                     let output = cmd.output().expect("failed to execute process");
 
-                    let (tree, root) = &mut *m.lock().unwrap();
+                    let (zup_tree, zup_flavors) = &mut *m.lock().unwrap();
 
                     if !output.status.success() {
                         println!("===============");
@@ -186,11 +178,28 @@ fn main() -> io::Result<()> {
                         process::exit(1);
                     }
 
-                    let dir = tree.pack(&doc_dir, &pack_config).unwrap().unwrap();
-                    root.push(DirectoryEntry {
+                    let doc_crate_dir = doc_dir.join(crate_name.replace('-', "_"));
+
+                    fs::rename(
+                        doc_dir.join("search-index.js"),
+                        doc_crate_dir.join("search-index.js"),
+                    )
+                    .unwrap();
+
+                    let dir = zup_tree
+                        .pack(&doc_crate_dir, &pack_config)
+                        .unwrap()
+                        .unwrap();
+                    zup_flavors.push(DirectoryEntry {
                         name: flavor.name.clone(),
                         node_id: dir,
                     });
+
+                    fs::remove_dir_all(doc_crate_dir).unwrap();
+                    fs::remove_dir_all(doc_dir.join("src")).unwrap();
+                    fs::remove_dir_all(doc_dir.join("implementors")).unwrap();
+                    fs::remove_file(doc_dir.join("crates.js")).unwrap();
+                    fs::remove_file(doc_dir.join("source-files.js")).unwrap();
                 }
             });
         }
@@ -201,13 +210,33 @@ fn main() -> io::Result<()> {
         let _ = fs::create_dir_all(p);
     }
 
-    println!("total nodes: {}", tree.node_count());
-    println!("total bytes: {}", tree.total_bytes());
+    println!("total nodes: {}", zup_tree.node_count());
+    println!("total bytes: {}", zup_tree.total_bytes());
     println!("compressing...");
 
-    let root = Node::Directory(Directory { entries: root });
-    let root = tree.add_node(root);
-    tree.write(&output_path, root)?;
+    let zup_flavors = zup_tree.add_node(Node::Directory(Directory {
+        entries: zup_flavors,
+    }));
+
+    let zup_manifest = zup_tree.add_node(Node::File(File {
+        data: manifest_bytes,
+    }));
+
+    let zup_root = Node::Directory(Directory {
+        entries: vec![
+            DirectoryEntry {
+                name: "flavors".to_string(),
+                node_id: zup_flavors,
+            },
+            DirectoryEntry {
+                name: "Cargo.toml".to_string(),
+                node_id: zup_manifest,
+            },
+        ],
+    });
+
+    let zup_root = zup_tree.add_node(zup_root);
+    zup_tree.write(&output_path, zup_root)?;
 
     Ok(())
 }

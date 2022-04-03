@@ -58,10 +58,8 @@ spec:
         - name: web
           containerPort: 3000
         env:
-        - name: DOCSERVER_STATIC_PATH
-          value: /data/static
-        - name: DOCSERVER_CRATES_PATH
-          value: /data/crates
+        - name: DOCSERVER_PATH
+          value: /data
         volumeMounts:
         - name: data
           mountPath: /data

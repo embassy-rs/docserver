@@ -5,7 +5,7 @@ use hyper::header::HeaderValue;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use log::info;
-use regex::bytes::Regex as ByteRegex;
+use regex::bytes::{Captures, Regex as ByteRegex};
 use std::convert::Infallible;
 use std::io::{self, ErrorKind};
 use std::path::PathBuf;
@@ -16,6 +16,9 @@ use crate::zup::read::Reader;
 
 #[path = "../zup/mod.rs"]
 mod zup;
+
+#[path = "../manifest.rs"]
+mod manifest;
 
 fn extension(path: &str) -> &str {
     match path.rfind('.') {
@@ -42,15 +45,22 @@ fn mime_type(extension: &str) -> &'static str {
 }
 
 struct Thing {
-    static_path: PathBuf,
-    crates_path: PathBuf,
+    path: PathBuf,
     templates: Tera,
 }
 
 impl Thing {
+    fn crates_path(&self) -> PathBuf {
+        self.path.join("crates")
+    }
+    fn crate_path(&self, krate: &str) -> PathBuf {
+        self.path.join("crates").join(&krate)
+    }
+
     fn crate_zup(&self, krate: &str, version: &str) -> io::Result<Reader> {
         let zup_path = self
-            .crates_path
+            .path
+            .join("crates")
             .join(krate)
             .join(format!("{}.zup", version));
         Reader::new(&zup_path)
@@ -58,7 +68,7 @@ impl Thing {
 
     fn list_crates(&self) -> io::Result<Vec<String>> {
         let mut res = Vec::new();
-        for f in fs::read_dir(&self.crates_path)? {
+        for f in fs::read_dir(self.crates_path())? {
             let f = f?;
             res.push(f.file_name().to_str().unwrap().to_string())
         }
@@ -67,10 +77,10 @@ impl Thing {
     }
 
     fn list_crate_versions(&self, krate: &str) -> io::Result<Vec<String>> {
-        let _path = self.crates_path.join(krate);
+        let path = self.crate_path(krate);
 
         let mut res = Vec::new();
-        for f in fs::read_dir(&self.crates_path)? {
+        for f in fs::read_dir(path)? {
             let f = f?;
             let name = f.file_name();
             let name = name.to_str().unwrap();
@@ -101,13 +111,24 @@ impl Thing {
         Ok(r)
     }
 
-    async fn serve_static(&self, path: &str) -> anyhow::Result<Response<Body>> {
-        let path = self.static_path.join(path);
+    async fn serve_static(&self, pathh: &str) -> anyhow::Result<Response<Body>> {
+        let path = self.path.join("static").join(pathh);
         let data = match fs::read(path) {
             Err(e) if e.kind() == ErrorKind::NotFound => return self.resp_404(),
             x => x?,
         };
-        Ok(Response::new(Body::from(data)))
+
+        let ext = extension(pathh);
+        let mime = mime_type(ext);
+
+        let mut resp = Response::new(Body::from(data));
+        let h = resp.headers_mut();
+        h.insert("Content-Type", HeaderValue::from_static(mime.into()));
+        h.insert(
+            "Cache-Control",
+            HeaderValue::from_static("max-age=31536000"),
+        );
+        Ok(resp)
     }
 
     async fn serve_inner(&self, req: Request<Body>) -> anyhow::Result<Response<Body>> {
@@ -158,7 +179,10 @@ impl Thing {
                     Err(e) if e.kind() == ErrorKind::NotFound => return self.resp_404(),
                     x => x?,
                 };
-                let mut data = match zup.read(&path[2..]) {
+
+                let mut zup_path = vec!["flavors"];
+                zup_path.extend_from_slice(&path[2..]);
+                let mut data = match zup.read(&zup_path) {
                     Err(e) if e.kind() == ErrorKind::NotFound => return self.resp_404(),
                     x => x?,
                 }
@@ -168,6 +192,46 @@ impl Thing {
                 let mime = mime_type(ext);
 
                 if ext == "html" {
+                    let manifest = zup.read(&["Cargo.toml"]).unwrap();
+                    let manifest: manifest::Manifest = toml::from_slice(&manifest).unwrap();
+                    let meta = &manifest.package.metadata.embassy_docs;
+
+                    let srclink_base = if version == "git" {
+                        meta.src_base_git.to_string()
+                    } else {
+                        meta.src_base.replace("$VERSION", version).to_string()
+                    };
+
+                    let re = ByteRegex::new("(src|href)=\"([^\"]+)\"").unwrap();
+                    data = re
+                        .replace_all(&data, |c: &Captures| {
+                            let attr = c.get(1).unwrap().as_bytes();
+                            let mut link = c.get(2).unwrap().as_bytes().to_vec();
+
+                            if link.starts_with(b"/__DOCSERVER_STATIC") {
+                                let mut link2 = b"/static".to_vec();
+                                link2.extend_from_slice(&link[19..]);
+                                link = link2
+                            }
+
+                            if link.starts_with(b"/__DOCSERVER_SRCLINK/") {
+                                let link_path = std::str::from_utf8(&link[21..]).unwrap();
+                                let i = link_path.find('#').unwrap();
+                                let link_fragment = link_path[i + 1..].replace('-', "-L");
+                                let link_path = link_path[..i].replace(".html", "");
+                                link = format!("{}{}#L{}", srclink_base, link_path, link_fragment)
+                                    .into();
+                            }
+
+                            let mut res = Vec::new();
+                            res.extend_from_slice(attr);
+                            res.extend_from_slice(b"=");
+                            res.extend_from_slice(b"\"");
+                            res.extend_from_slice(&link);
+                            res.extend_from_slice(b"\"");
+                            res
+                        })
+                        .into_owned();
                     let re_head = ByteRegex::new("</head>").unwrap();
                     let re_body = ByteRegex::new("<body class=\"([^\"]*)\">").unwrap();
                     if let (Some(head), Some(body)) = (re_head.find(&data), re_body.captures(&data))
@@ -222,18 +286,11 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let templates = Tera::new("templates/**/*.html").unwrap();
 
-    let static_path: PathBuf = env::var_os("DOCSERVER_STATIC_PATH")
-        .expect("Missing DOCSERVER_STATIC_PATH")
-        .into();
-    let crates_path: PathBuf = env::var_os("DOCSERVER_CRATES_PATH")
-        .expect("Missing DOCSERVER_CRATES_PATH")
+    let path: PathBuf = env::var_os("DOCSERVER_PATH")
+        .expect("Missing DOCSERVER_PATH")
         .into();
 
-    let thing = Thing {
-        static_path,
-        crates_path,
-        templates,
-    };
+    let thing = Thing { path, templates };
     let thing: &'static Thing = Box::leak(Box::new(thing));
 
     let addr = ([0, 0, 0, 0], 3000).into();

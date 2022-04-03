@@ -2,6 +2,8 @@
 #![feature(let_else)]
 
 use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
 use zup::layout;
 use zup::read::Node;
 
@@ -40,9 +42,9 @@ impl Walker {
             Node::File(n) => {
                 self.files += 1;
                 self.bytes += n.read().unwrap().len();
-                //let p = PathBuf::from("extract".to_string()).join(path);
-                //fs::create_dir_all(p.parent().unwrap()).unwrap();
-                //fs::write(p, n.read().unwrap()).unwrap();
+                let p = PathBuf::from("extract".to_string()).join(path);
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(p, n.read().unwrap()).unwrap();
             }
         }
     }
@@ -51,7 +53,7 @@ impl Walker {
 pub fn main() {
     pretty_env_logger::init();
 
-    let zup = Reader::new("./webroot/crates/embassy-stm32/0.1.0.zup").unwrap();
+    let zup = Reader::new("./webroot/crates/embassy/0.1.0.zup").unwrap();
 
     let mut w = Walker::new();
     w.walk(zup.root_node(), "extract".to_string());

@@ -93,9 +93,15 @@ impl Tree {
 
         let m = fs::metadata(&path)?;
         let node = if m.is_dir() {
-            let mut entries = Vec::new();
+            let mut readdir = Vec::new();
             for entry in fs::read_dir(&path)? {
-                let entry = entry?;
+                readdir.push(entry?);
+            }
+            readdir.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+            let mut entries = Vec::new();
+
+            for entry in readdir {
                 let child = entry.path();
 
                 if !(config.file_filter)(&child) {
