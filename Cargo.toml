@@ -25,6 +25,8 @@ tokio = { version = "1", features = [
     "sync",
     "time",
     "test-util",
+    "signal",
 ] }
 toml = "0.5.8"
 zstd = "0.9.2"
+tera = "1"

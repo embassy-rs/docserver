@@ -1,0 +1,46 @@
+<style type="text/css">
+    body {
+        padding: 0;
+        position: relative;
+    }
+
+    .embassy-header {
+        z-index: 999;
+        border-bottom: 1px solid #555;
+        background-color: var(--color-background);
+        left: 0;
+        right: 0;
+        top: 0;
+        height: 32px;
+        font: 14px "Fira Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+        background-color: black;
+        color: white;
+        position: fixed;
+
+        box-sizing: border-box;
+    }
+
+    .embassy-header>a {
+        display: inline-block;
+        vertical-align: middle;
+        padding: .5em 1em;
+    }
+
+    main,
+    .sidebar {
+        padding-top: 48px;
+    }
+
+    .embassy-dropdown:after {
+        font-size: 0.8em;
+        content: "\25BC";
+    }
+
+    .fa-svg svg {
+        width: 1em;
+        height: 1em;
+        fill: currentColor;
+        margin-bottom: -0.1em;
+    }
+</style>

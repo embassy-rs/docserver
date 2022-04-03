@@ -1,45 +1,59 @@
 #![feature(io_error_more)]
+#![feature(let_else)]
 
+use hyper::header::HeaderValue;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use log::info;
-use std::collections::HashMap;
+use regex::bytes::Regex as ByteRegex;
 use std::convert::Infallible;
 use std::io::{self, ErrorKind};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::PathBuf;
 use std::{env, fs};
+use tera::Tera;
 
 use crate::zup::read::Reader;
 
 #[path = "../zup/mod.rs"]
 mod zup;
 
+fn extension(path: &str) -> &str {
+    match path.rfind('.') {
+        Some(x) => &path[x + 1..],
+        None => "",
+    }
+}
+
+fn mime_type(extension: &str) -> &'static str {
+    match extension {
+        "html" => "text/html",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "json" => "application/json",
+        "ttf" => "application/x-font-ttf",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" => "image/jpeg",
+        "txt" => "text/plain",
+        _ => "application/octet-stream", // unknown
+    }
+}
+
 struct Thing {
     static_path: PathBuf,
     crates_path: PathBuf,
-    zups: Mutex<HashMap<PathBuf, &'static Reader>>,
+    templates: Tera,
 }
 
 impl Thing {
-    fn open_zup(&self, path: &Path) -> io::Result<&'static Reader> {
-        let mut zups = self.zups.lock().unwrap();
-        if let Some(zup) = zups.get(path) {
-            Ok(zup)
-        } else {
-            let zup = Reader::new(path)?;
-            let zup = Box::leak(Box::new(zup));
-            zups.insert(path.to_owned(), zup);
-            Ok(zup)
-        }
-    }
-
-    fn crate_zup(&self, krate: &str, version: &str) -> io::Result<&'static Reader> {
+    fn crate_zup(&self, krate: &str, version: &str) -> io::Result<Reader> {
         let zup_path = self
             .crates_path
             .join(krate)
             .join(format!("{}.zup", version));
-        self.open_zup(&zup_path)
+        Reader::new(&zup_path)
     }
 
     fn list_crates(&self) -> io::Result<Vec<String>> {
@@ -53,7 +67,7 @@ impl Thing {
     }
 
     fn list_crate_versions(&self, krate: &str) -> io::Result<Vec<String>> {
-        let path = self.crates_path.join(krate);
+        let _path = self.crates_path.join(krate);
 
         let mut res = Vec::new();
         for f in fs::read_dir(&self.crates_path)? {
@@ -121,35 +135,62 @@ impl Thing {
             &[] => {
                 let crates = self.list_crates()?;
                 println!("crates: {:?}", crates);
-                Ok(Response::new(Body::from("list krates")))
+                Ok(Response::new(Body::from("TODO: list crates")))
             }
 
             // List crate versions
-            &[krate] => {
+            &[_krate] => {
                 //asdfa
-                Ok(Response::new(Body::from("list krate versions")))
+                Ok(Response::new(Body::from("TODO: list crate versions")))
             }
 
-            // List crate targets
-            &[krate, version] => {
+            // List crate flavors
+            &[_krate, _version] => {
                 // lol
                 Ok(Response::new(Body::from(
-                    "list krate targets for a version",
+                    "TODO: list crate flavors for a version",
                 )))
             }
 
-            // Get flie from crate version+target
-            &[krate, version, _target, ..] => {
+            // Get file from crate version+flavor
+            &[krate, version, _flavor, ..] => {
                 let zup = match self.crate_zup(krate, version) {
                     Err(e) if e.kind() == ErrorKind::NotFound => return self.resp_404(),
                     x => x?,
                 };
-                let data = match zup.read(&path[2..]) {
+                let mut data = match zup.read(&path[2..]) {
                     Err(e) if e.kind() == ErrorKind::NotFound => return self.resp_404(),
                     x => x?,
-                };
+                }
+                .into_owned();
 
-                Ok(Response::new(Body::from(data)))
+                let ext = extension(path[path.len() - 1]);
+                let mime = mime_type(ext);
+
+                if ext == "html" {
+                    let re_head = ByteRegex::new("</head>").unwrap();
+                    let re_body = ByteRegex::new("<body class=\"([^\"]*)\">").unwrap();
+                    if let (Some(head), Some(body)) = (re_head.find(&data), re_body.captures(&data))
+                    {
+                        let m = body.get(0).unwrap();
+                        let mut data2 = Vec::new();
+                        data2.extend_from_slice(&data[..head.start()]);
+                        data2.extend_from_slice(&fs::read("templates/head.html").unwrap());
+                        data2.extend_from_slice(&data[head.start()..m.start()]);
+                        data2.extend_from_slice(b"<body>");
+                        data2.extend_from_slice(&fs::read("templates/nav.html").unwrap());
+                        data2.extend_from_slice(b"<div class=\"body-wrapper ");
+                        data2.extend_from_slice(&body[1]);
+                        data2.extend_from_slice(b"\">");
+                        data2.extend_from_slice(&data[m.end()..]);
+                        data = data2;
+                    }
+                }
+
+                let mut resp = Response::new(Body::from(data));
+                resp.headers_mut()
+                    .insert("Content-Type", HeaderValue::from_static(mime.into()));
+                Ok(resp)
             }
             _ => self.resp_404(),
         }
@@ -168,23 +209,41 @@ impl Thing {
     }
 }
 
+async fn shutdown_signal() {
+    // Wait for the CTRL+C signal
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install CTRL+C signal handler");
+}
+
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     pretty_env_logger::init();
 
+    let templates = Tera::new("templates/**/*.html").unwrap();
+
+    let static_path: PathBuf = env::var_os("DOCSERVER_STATIC_PATH")
+        .expect("Missing DOCSERVER_STATIC_PATH")
+        .into();
+    let crates_path: PathBuf = env::var_os("DOCSERVER_CRATES_PATH")
+        .expect("Missing DOCSERVER_CRATES_PATH")
+        .into();
+
     let thing = Thing {
-        static_path: PathBuf::from("./webroot/static/"),
-        crates_path: PathBuf::from("./webroot/crates/"),
-        zups: Mutex::new(HashMap::new()),
+        static_path,
+        crates_path,
+        templates,
     };
     let thing: &'static Thing = Box::leak(Box::new(thing));
 
-    let addr = ([127, 0, 0, 1], 3000).into();
+    let addr = ([0, 0, 0, 0], 3000).into();
     let server = Server::bind(&addr).serve(make_service_fn(move |_conn| async move {
         Ok::<_, Infallible>(service_fn(move |req| async move {
             Result::<_, Infallible>::Ok(thing.serve(req).await)
         }))
     }));
+
+    let server = server.with_graceful_shutdown(shutdown_signal());
 
     println!("Listening on http://{}", addr);
 
