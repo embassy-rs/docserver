@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 #[derive(Deserialize)]
 pub struct Manifest {
+    #[serde(default)]
     pub features: HashMap<String, Vec<String>>,
     pub package: Package,
 }

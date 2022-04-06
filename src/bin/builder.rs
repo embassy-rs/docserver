@@ -45,6 +45,8 @@ fn pack_config(crate_name: &str) -> PackConfig {
     // Rewrite links from `../crate_name" to "".
     let re_rewrite_root = ByteRegex::new(&format!("\\.\\./{}/", &crate_name)).unwrap();
 
+    let re_fix_root_path = ByteRegex::new("data-root-path=\"\\.\\./").unwrap();
+
     PackConfig {
         file_filter: Box::new(|path| {
             path.file_name().map_or(true, |f| {
@@ -66,6 +68,9 @@ fn pack_config(crate_name: &str) -> PackConfig {
                     )
                     .into_owned();
                 let res = re_rewrite_root.replace_all(&res, &[][..]).into_owned();
+                let res = re_fix_root_path
+                    .replace_all(&res, &b"data-root-path=\"./"[..])
+                    .into_owned();
                 *data = res;
             }
         }),
@@ -195,11 +200,11 @@ fn main() -> io::Result<()> {
                         node_id: dir,
                     });
 
-                    fs::remove_dir_all(doc_crate_dir).unwrap();
-                    fs::remove_dir_all(doc_dir.join("src")).unwrap();
-                    fs::remove_dir_all(doc_dir.join("implementors")).unwrap();
-                    fs::remove_file(doc_dir.join("crates.js")).unwrap();
-                    fs::remove_file(doc_dir.join("source-files.js")).unwrap();
+                    //fs::remove_dir_all(doc_crate_dir).unwrap();
+                    //fs::remove_dir_all(doc_dir.join("src")).unwrap();
+                    //fs::remove_dir_all(doc_dir.join("implementors")).unwrap();
+                    //fs::remove_file(doc_dir.join("crates.js")).unwrap();
+                    //fs::remove_file(doc_dir.join("source-files.js")).unwrap();
                 }
             });
         }

@@ -6,11 +6,13 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use log::info;
 use regex::bytes::{Captures, Regex as ByteRegex};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io::{self, ErrorKind};
 use std::path::PathBuf;
 use std::{env, fs};
-use tera::Tera;
+use tera::{Context, Tera};
+use zup::read::Node;
 
 use crate::zup::read::Reader;
 
@@ -76,7 +78,7 @@ impl Thing {
         Ok(res)
     }
 
-    fn list_crate_versions(&self, krate: &str) -> io::Result<Vec<String>> {
+    fn list_versions(&self, krate: &str) -> io::Result<Vec<String>> {
         let path = self.crate_path(krate);
 
         let mut res = Vec::new();
@@ -89,6 +91,21 @@ impl Thing {
             }
         }
         res.sort_by(|a, b| b.cmp(a)); // reverse
+        Ok(res)
+    }
+
+    fn list_flavors(&self, krate: &str, version: &str) -> io::Result<Vec<String>> {
+        let zup = self.crate_zup(krate, version)?;
+        let flavors = zup.open(&["flavors"])?;
+        let Node::Directory(dir) = flavors else {
+            panic!("flavors is not a dir")
+        };
+
+        let mut res = Vec::new();
+        for (name, _) in dir.children()? {
+            res.push(name)
+        }
+        res.sort();
         Ok(res)
     }
 
@@ -131,6 +148,58 @@ impl Thing {
         Ok(resp)
     }
 
+    async fn guess_redirect(
+        &self,
+        req: &Request<Body>,
+        mut krate: Option<&str>,
+        mut version: Option<&str>,
+    ) -> anyhow::Result<Response<Body>> {
+        // Parse cookies
+        let mut cookies = HashMap::new();
+        if let Some(h) = req.headers().get("Cookie") {
+            for item in h.to_str().unwrap().split(';') {
+                if let Some((k, v)) = item.trim().split_once('=') {
+                    cookies.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
+        // Crate
+        let crates = self.list_crates()?;
+        if krate == None {
+            krate = cookies.get(&"crate".to_string()).map(|s| s.as_str());
+        }
+        let krate = krate.unwrap_or("embassy");
+
+        // Version
+        let versions = self.list_versions(krate)?;
+        if version == None {
+            version = cookies
+                .get(&format!("crate-{}-version", krate))
+                .map(|s| s.as_str());
+        }
+        let version = version.unwrap_or(&versions[0]);
+
+        // Flavor
+        let flavors = self.list_flavors(krate, version)?;
+        let mut flavor = cookies
+            .get(&format!("crate-{}-flavor", krate))
+            .map(|s| s.as_str());
+        let flavor = flavor.unwrap_or(&flavors[0]);
+
+        let mut resp = Response::new(Body::from("Redirect"));
+        *resp.status_mut() = StatusCode::FOUND;
+        let h = resp.headers_mut();
+        h.append(
+            "Location",
+            format!("/{}/{}/{}/index.html", krate, version, flavor)
+                .try_into()
+                .unwrap(),
+        );
+
+        Ok(resp)
+    }
+
     async fn serve_inner(&self, req: Request<Body>) -> anyhow::Result<Response<Body>> {
         if req.method() != Method::GET {
             return self.resp_405();
@@ -152,29 +221,12 @@ impl Thing {
             // Serve static file
             &["static", ref path @ ..] => self.serve_static(&path.join("/")).await,
 
-            // List crates
-            &[] => {
-                let crates = self.list_crates()?;
-                println!("crates: {:?}", crates);
-                Ok(Response::new(Body::from("TODO: list crates")))
-            }
-
-            // List crate versions
-            &[_krate] => {
-                //asdfa
-                Ok(Response::new(Body::from("TODO: list crate versions")))
-            }
-
-            // List crate flavors
-            &[_krate, _version] => {
-                // lol
-                Ok(Response::new(Body::from(
-                    "TODO: list crate flavors for a version",
-                )))
-            }
+            &[] => self.guess_redirect(&req, None, None).await,
+            &[krate] => self.guess_redirect(&req, Some(krate), None).await,
+            &[krate, version] => self.guess_redirect(&req, Some(krate), Some(version)).await,
 
             // Get file from crate version+flavor
-            &[krate, version, _flavor, ..] => {
+            &[krate, version, flavor, ..] => {
                 let zup = match self.crate_zup(krate, version) {
                     Err(e) if e.kind() == ErrorKind::NotFound => return self.resp_404(),
                     x => x?,
@@ -236,13 +288,24 @@ impl Thing {
                     let re_body = ByteRegex::new("<body class=\"([^\"]*)\">").unwrap();
                     if let (Some(head), Some(body)) = (re_head.find(&data), re_body.captures(&data))
                     {
+                        let mut context = Context::new();
+                        context.insert("crate", &krate);
+                        context.insert("version", &version);
+                        context.insert("flavor", &flavor);
+                        context.insert("crates", &self.list_crates().unwrap());
+                        context.insert("versions", &self.list_versions(krate).unwrap());
+                        context.insert("flavors", &self.list_flavors(krate, version).unwrap());
+
+                        let rendered_head = self.templates.render("head.html", &context).unwrap();
+                        let rendered_nav = self.templates.render("nav.html", &context).unwrap();
+
                         let m = body.get(0).unwrap();
                         let mut data2 = Vec::new();
                         data2.extend_from_slice(&data[..head.start()]);
-                        data2.extend_from_slice(&fs::read("templates/head.html").unwrap());
+                        data2.extend_from_slice(rendered_head.as_bytes());
                         data2.extend_from_slice(&data[head.start()..m.start()]);
                         data2.extend_from_slice(b"<body>");
-                        data2.extend_from_slice(&fs::read("templates/nav.html").unwrap());
+                        data2.extend_from_slice(rendered_nav.as_bytes());
                         data2.extend_from_slice(b"<div class=\"body-wrapper ");
                         data2.extend_from_slice(&body[1]);
                         data2.extend_from_slice(b"\">");
@@ -252,8 +315,24 @@ impl Thing {
                 }
 
                 let mut resp = Response::new(Body::from(data));
-                resp.headers_mut()
-                    .insert("Content-Type", HeaderValue::from_static(mime.into()));
+                let h = resp.headers_mut();
+                h.append("Content-Type", mime.try_into().unwrap());
+
+                let mut set_cookie = |k, v| {
+                    h.append(
+                        "Set-Cookie",
+                        format!("{}={}; Path=/; Max-Age=31536000", k, v)
+                            .try_into()
+                            .unwrap(),
+                    );
+                };
+
+                let cookie_version = format!("crate-{}-version", krate);
+                let cookie_flavor = format!("crate-{}-flavor", krate);
+                set_cookie("crate", &krate);
+                set_cookie(&cookie_version, &version);
+                set_cookie(&cookie_flavor, &flavor);
+
                 Ok(resp)
             }
             _ => self.resp_404(),

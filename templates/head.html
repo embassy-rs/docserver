@@ -21,20 +21,71 @@
         box-sizing: border-box;
     }
 
-    .embassy-header>a {
+    .embassy-header a:hover {
+        background-color: #222;
+    }
+
+    .embassy-header>div {
+        display: inline-block;
+    }
+
+    .embassy-header>div>a {
         display: inline-block;
         vertical-align: middle;
-        padding: .5em 1em;
+        padding: 8px 16px;
+        box-sizing: border-box;
     }
+
+    .embassy-dropdown>a:after {
+        font-size: 12px;
+        content: "\25BC";
+    }
+
+    .embassy-dropdown-shown {
+        display: block !important;
+    }
+
+    .embassy-dropdown>div {
+        display: none;
+        position: absolute;
+        top: 100%;
+        background-color: black;
+        color: white;
+        border: 1px solid #555;
+        width: 300px;
+        max-height: 80vh;
+        overflow-y: auto;
+    }
+
+    .embassy-dropdown h1 {
+        padding: 8px 16px;
+        margin: 0px;
+        margin-top: 8px;
+        font-size: 14px;
+        font-weight: bold;
+        text-transform: uppercase;
+    }
+
+    .embassy-dropdown ul {
+        padding: 0;
+        margin: 0;
+        margin-bottom: 8px;
+    }
+
+    .embassy-dropdown ul>li {
+        list-style: none;
+    }
+
+    .embassy-dropdown ul>li>a {
+        display: block;
+        padding: 8px 16px;
+        width: 100%;
+    }
+
 
     main,
     .sidebar {
         padding-top: 48px;
-    }
-
-    .embassy-dropdown:after {
-        font-size: 0.8em;
-        content: "\25BC";
     }
 
     .fa-svg svg {
@@ -44,3 +95,32 @@
         margin-bottom: -0.1em;
     }
 </style>
+
+<script type="text/javascript" defer>
+    window.addEventListener("load", () => {
+        for (el of document.getElementsByClassName('embassy-dropdown')) {
+            const link = el.getElementsByTagName('a')[0];
+            const myDropdown = el.getElementsByTagName('div')[0];
+            myDropdown.addEventListener('click', e => {
+                e.stopPropagation();
+            });
+            link.addEventListener('click', e => {
+                const had = myDropdown.classList.contains('embassy-dropdown-shown');
+                for (dropdown of [...document.getElementsByClassName('embassy-dropdown-shown')]) {
+                    dropdown.classList.remove("embassy-dropdown-shown")
+                }
+                e.stopPropagation();
+                e.preventDefault();
+                if (!had) {
+                    myDropdown.classList.toggle('embassy-dropdown-shown');
+                }
+            });
+        }
+
+        window.addEventListener('click', e => {
+            for (el of [...document.getElementsByClassName('embassy-dropdown-shown')]) {
+                el.classList.remove("embassy-dropdown-shown")
+            }
+        });
+    });
+</script>
