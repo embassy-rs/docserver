@@ -1,11 +1,74 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 
 #[derive(Deserialize)]
 pub struct Manifest {
+    pub package: Package,
     #[serde(default)]
     pub features: HashMap<String, Vec<String>>,
-    pub package: Package,
+    #[serde(default)]
+    pub dependencies: HashMap<String, Dependency>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum DependencyEnum {
+    Short(String),
+    Full(Dependency),
+}
+
+pub struct Dependency {
+    pub version: Option<String>,
+    pub path: Option<String>,
+    pub git: Option<String>,
+    pub rev: Option<String>,
+    pub features: Vec<String>,
+    pub no_default_features: bool,
+    pub optional: bool,
+}
+
+impl<'de> Deserialize<'de> for Dependency {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(remote = "Dependency")] // cannot use `Self` here
+        struct Full {
+            #[serde(default)]
+            version: Option<String>,
+            #[serde(default)]
+            path: Option<String>,
+            #[serde(default)]
+            git: Option<String>,
+            #[serde(default)]
+            rev: Option<String>,
+            #[serde(default)]
+            features: Vec<String>,
+            #[serde(default)]
+            no_default_features: bool,
+            #[serde(default)]
+            optional: bool,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ShortOrFull {
+            Short(String),
+            #[serde(with = "Full")]
+            Full(Dependency),
+        }
+
+        Ok(match ShortOrFull::deserialize(deserializer)? {
+            ShortOrFull::Short(version) => Self {
+                version: Some(version),
+                features: Vec::new(),
+                no_default_features: false,
+                optional: false,
+                path: None,
+                git: None,
+                rev: None,
+            },
+            ShortOrFull::Full(this) => this,
+        })
+    }
 }
 
 #[derive(Deserialize)]

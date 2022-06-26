@@ -1,10 +1,9 @@
 #![feature(io_error_more)]
 #![feature(let_else)]
 
-use std::borrow::Cow;
 use std::env::{self};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::Mutex;
 use std::{fs, io};
@@ -45,6 +44,10 @@ fn pack_config(crate_name: &str) -> PackConfig {
     // Rewrite links from `../crate_name" to "".
     let re_rewrite_root = ByteRegex::new(&format!("\\.\\./{}/", &crate_name)).unwrap();
 
+    // Rewrite links from `__REMOVE_NEXT_PATH_COMPONENT__/blah" to "".
+    let re_remove_next_path_component =
+        ByteRegex::new("__REMOVE_NEXT_PATH_COMPONENT__/[a-zA-Z0-9_-]+/").unwrap();
+
     let re_fix_root_path = ByteRegex::new("data-root-path=\"\\.\\./").unwrap();
 
     PackConfig {
@@ -61,6 +64,9 @@ fn pack_config(crate_name: &str) -> PackConfig {
                 let res = re_remove_settings.replace_all(&res, &[][..]).into_owned();
                 let res = re_remove_hidden_src.replace_all(&res, &[][..]).into_owned();
                 let res = re_remove_cratesjs.replace_all(&res, &[][..]).into_owned();
+                let res = re_remove_next_path_component
+                    .replace_all(&res, &[][..])
+                    .into_owned();
                 let res = re_rewrite_src
                     .replace_all(
                         &res,
@@ -84,18 +90,18 @@ struct Flavor {
     target: String,
 }
 
-fn main() -> io::Result<()> {
-    let mut zup_tree = zup::write::Tree::new();
-    let mut zup_flavors = Vec::new();
+const NUM_THREADS: usize = 4;
 
-    let args: Vec<_> = env::args().collect();
-    let manifest_path = PathBuf::from(&args[1]);
-    let output_path = PathBuf::from(&args[2]);
+fn load_manifest_bytes(crate_path: &Path) -> Vec<u8> {
+    let manifest_path = crate_path.join("Cargo.toml");
+    fs::read(&manifest_path).unwrap()
+}
 
-    let m = Mutex::new((&mut zup_tree, &mut zup_flavors));
+fn load_manifest(crate_path: &Path) -> manifest::Manifest {
+    toml::from_slice(&load_manifest_bytes(crate_path)).unwrap()
+}
 
-    let manifest_bytes = fs::read(&manifest_path).unwrap();
-    let manifest: manifest::Manifest = toml::from_slice(&manifest_bytes).unwrap();
+fn calc_flavors(manifest: &manifest::Manifest) -> Vec<Flavor> {
     let docs = &manifest.package.metadata.embassy_docs;
 
     let mut flavors = Vec::new();
@@ -125,21 +131,53 @@ fn main() -> io::Result<()> {
         }
     }
 
+    flavors
+}
+
+fn match_flavor<'a>(local: &Flavor, dep: &'a [Flavor]) -> Option<&'a Flavor> {
+    // Match by name.
+    if let Some(f) = dep.iter().find(|f| f.name == local.name) {
+        return Some(f);
+    }
+
+    // Match by target.
+    if let Some(f) = dep.iter().find(|f| f.target == local.target) {
+        return Some(f);
+    }
+
+    // Just pick any, or none if there are no flavors.
+    dep.get(0)
+}
+
+fn main() -> io::Result<()> {
+    let mut zup_tree = zup::write::Tree::new();
+    let mut zup_flavors = Vec::new();
+
+    let args: Vec<_> = env::args().collect();
+    let crate_path = PathBuf::from(&args[1]);
+    let output_path = PathBuf::from(&args[2]);
+
+    let m = Mutex::new((&mut zup_tree, &mut zup_flavors));
+
+    let manifest_bytes = load_manifest_bytes(&crate_path);
+    let manifest = load_manifest(&crate_path);
+
     let (tx, rx) = unbounded();
-    for flavor in flavors {
+    for flavor in calc_flavors(&manifest) {
         tx.send(flavor).unwrap();
     }
     drop(tx);
 
     thread::scope(|s| {
         // Spawn workers
-        for i in 0..6 {
+        for i in 0..NUM_THREADS {
             let j = i;
             let rx = &rx;
-            let manifest_path = &manifest_path;
+            let crate_path = &crate_path;
+            let manifest = &manifest;
             let m = &m;
-            let crate_name = &manifest.package.name;
             s.spawn(move |_| {
+                let crate_name = &manifest.package.name;
                 let pack_config = pack_config(crate_name);
                 let target_dir = format!("target_doc/work{}", j);
 
@@ -154,17 +192,36 @@ fn main() -> io::Result<()> {
                         "--target-dir",
                         &target_dir,
                         "--manifest-path",
-                        manifest_path.to_str().unwrap(),
+                        crate_path.join("Cargo.toml").to_str().unwrap(),
                         "--features",
                         &flavor.features.join(","),
                         "--target",
                         &flavor.target,
+                        "-Zunstable-options",
+                        "-Zrustdoc-map",
                         "--",
-                        "-Z",
-                        "unstable-options",
+                        "-Zunstable-options",
+                        "--disable-per-crate-search",
                         "--static-root-path",
                         "/__DOCSERVER_STATIC/",
                     ]);
+
+                    for (dep_name, dep) in &manifest.dependencies {
+                        if let Some(path) = &dep.path {
+                            let dep_manifest = load_manifest(&crate_path.join(path));
+                            let dep_flavors = calc_flavors(&dep_manifest);
+                            let dep_version = "git"; // todo
+                            if let Some(dep_flavor) = match_flavor(&flavor, &dep_flavors) {
+                            cmd.arg(format!(
+                                "--extern-html-root-url={}=https://docs.embassy.dev/{}/{}/{}/__REMOVE_NEXT_PATH_COMPONENT__",
+                                dep_name.replace('-', "_"),
+                                dep_name,
+                                dep_version,
+                                dep_flavor.name
+                            ));
+                        }
+                        }
+                    }
 
                     let output = cmd.output().expect("failed to execute process");
 
