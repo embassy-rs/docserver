@@ -63,7 +63,16 @@ fn pack_config(crate_name: &str) -> PackConfig {
                 let res = &data;
                 let res = re_remove_settings.replace_all(&res, &[][..]).into_owned();
                 let res = re_remove_hidden_src.replace_all(&res, &[][..]).into_owned();
-                let res = re_remove_cratesjs.replace_all(&res, &[][..]).into_owned();
+                let res = re_remove_cratesjs
+                    .replace_all(
+                        &res,
+                        format!(
+                            "<script type=\"text/javascript\">window.ALL_CRATES=[\"{}\"];</script>",
+                            crate_name
+                        )
+                        .as_bytes(),
+                    )
+                    .into_owned();
                 let res = re_remove_next_path_component
                     .replace_all(&res, &[][..])
                     .into_owned();
@@ -252,9 +261,21 @@ fn main() -> io::Result<()> {
 
                     let doc_crate_dir = doc_dir.join(crate_name.replace('-', "_"));
 
-                    fs::rename(
-                        doc_dir.join("search-index.js"),
+                    let bytes = fs::read(doc_dir.join("search-index.js")).unwrap();
+                    fs::write(
                         doc_crate_dir.join("search-index.js"),
+                        &bytes
+                    )
+                    .unwrap();
+
+
+                    // monkeypatch search.js to remove the crate name from the path.
+                    let js = fs::read(doc_dir.join("search.js")).unwrap();
+                    let monkeypatch = ByteRegex::new("return\\[displayPath,href\\]").unwrap();
+                    let js = monkeypatch.replace_all(&js, &b"href=href.slice(ROOT_PATH.length);href=ROOT_PATH+href.slice(href.indexOf('/')+1);return[displayPath,href]"[..]);
+                    fs::write(
+                        doc_crate_dir.join("search.js"),
+                        &js
                     )
                     .unwrap();
 
