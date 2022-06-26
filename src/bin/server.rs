@@ -248,8 +248,13 @@ impl Thing {
                     let manifest: manifest::Manifest = toml::from_slice(&manifest).unwrap();
                     let meta = &manifest.package.metadata.embassy_docs;
 
+                    let info = zup.read(&["info.json"]).unwrap();
+                    let info: manifest::DocserverInfo = serde_json::from_slice(&info).unwrap();
+
                     let srclink_base = if version == "git" {
-                        meta.src_base_git.to_string()
+                        meta.src_base_git
+                            .replace("$COMMIT", &info.git_commit)
+                            .to_string()
                     } else {
                         meta.src_base.replace("$VERSION", version).to_string()
                     };

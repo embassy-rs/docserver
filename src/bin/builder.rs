@@ -162,6 +162,16 @@ fn main() -> io::Result<()> {
     let manifest_bytes = load_manifest_bytes(&crate_path);
     let manifest = load_manifest(&crate_path);
 
+    let mut cmd = Command::new("git");
+    cmd.args(&["rev-parse", "HEAD"]);
+    cmd.current_dir(&crate_path);
+    let output = cmd.output().unwrap();
+    assert!(output.status.success());
+    let docserver_info = manifest::DocserverInfo {
+        git_commit: String::from_utf8(output.stdout).unwrap(),
+    };
+    let docserver_info_bytes = serde_json::to_vec(&docserver_info).unwrap();
+
     let (tx, rx) = unbounded();
     for flavor in calc_flavors(&manifest) {
         tx.send(flavor).unwrap();
@@ -280,10 +290,6 @@ fn main() -> io::Result<()> {
         entries: zup_flavors,
     }));
 
-    let zup_manifest = zup_tree.add_node(Node::File(File {
-        data: manifest_bytes,
-    }));
-
     let zup_root = Node::Directory(Directory {
         entries: vec![
             DirectoryEntry {
@@ -292,7 +298,15 @@ fn main() -> io::Result<()> {
             },
             DirectoryEntry {
                 name: "Cargo.toml".to_string(),
-                node_id: zup_manifest,
+                node_id: zup_tree.add_node(Node::File(File {
+                    data: manifest_bytes,
+                })),
+            },
+            DirectoryEntry {
+                name: "info.json".to_string(),
+                node_id: zup_tree.add_node(Node::File(File {
+                    data: docserver_info_bytes,
+                })),
             },
         ],
     });

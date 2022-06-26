@@ -1,5 +1,10 @@
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+
+#[derive(Serialize, Deserialize)]
+pub struct DocserverInfo {
+    pub git_commit: String,
+}
 
 #[derive(Deserialize)]
 pub struct Manifest {
