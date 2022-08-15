@@ -226,19 +226,12 @@ fn main() -> io::Result<()> {
                     ]);
 
                     for (dep_name, dep) in &manifest.dependencies {
-                        if let Some(path) = &dep.path {
-                            let dep_manifest = load_manifest(&crate_path.join(path));
-                            let dep_flavors = calc_flavors(&dep_manifest);
-                            let dep_version = "git"; // todo
-                            if let Some(dep_flavor) = match_flavor(&flavor, &dep_flavors) {
+                        if let Some(_) = &dep.path {
                             cmd.arg(format!(
-                                "--extern-html-root-url={}=https://docs.embassy.dev/{}/{}/{}/__REMOVE_NEXT_PATH_COMPONENT__",
+                                "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
                                 dep_name.replace('-', "_"),
                                 dep_name,
-                                dep_version,
-                                dep_flavor.name
                             ));
-                        }
                         }
                     }
 
