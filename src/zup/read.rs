@@ -78,7 +78,7 @@ impl Reader {
                         .find(|(name, _)| name == segment)
                         .ok_or_else(|| {
                             io::Error::new(
-                                io::ErrorKind::NotADirectory,
+                                io::ErrorKind::NotFound,
                                 format!("not found: {}", path[..i + 1].join("/")),
                             )
                         })?;

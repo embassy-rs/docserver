@@ -122,6 +122,14 @@ impl Thing {
         Ok(r)
     }
 
+    fn resp_redirect(&self, path: &str) -> anyhow::Result<Response<Body>> {
+        let mut resp = Response::new(Body::from("Redirect"));
+        *resp.status_mut() = StatusCode::FOUND;
+        let h = resp.headers_mut();
+        h.append("Location", path.try_into().unwrap());
+        Ok(resp)
+    }
+
     async fn serve_static(&self, pathh: &str) -> anyhow::Result<Response<Body>> {
         let path = self.path.join("static").join(pathh);
         let data = match fs::read(path) {
@@ -159,11 +167,14 @@ impl Thing {
         }
 
         // Crate
-        let crates = self.list_crates()?;
+        let krates = self.list_crates()?;
         if krate == None {
             krate = cookies.get(&"crate".to_string()).map(|s| s.as_str());
         }
-        let krate = krate.unwrap_or("embassy-util");
+        let mut krate = krate.unwrap_or("embassy-executor");
+        if krates.iter().find(|s| *s == krate).is_none() {
+            krate = "embassy-executor";
+        }
 
         // Version
         let versions = self.list_versions(krate)?;
@@ -172,26 +183,22 @@ impl Thing {
                 .get(&format!("crate-{}-version", krate))
                 .map(|s| s.as_str());
         }
-        let version = version.unwrap_or(&versions[0]);
+        let mut version = version.unwrap_or(&versions[0]);
+        if versions.iter().find(|s| *s == version).is_none() {
+            version = &versions[0];
+        }
 
         // Flavor
         let flavors = self.list_flavors(krate, version)?;
-        let mut flavor = cookies
+        let flavor = cookies
             .get(&format!("crate-{}-flavor", krate))
             .map(|s| s.as_str());
-        let flavor = flavor.unwrap_or(&flavors[0]);
+        let mut flavor = flavor.unwrap_or(&flavors[0]);
+        if flavors.iter().find(|s| *s == flavor).is_none() {
+            flavor = &flavors[0];
+        }
 
-        let mut resp = Response::new(Body::from("Redirect"));
-        *resp.status_mut() = StatusCode::FOUND;
-        let h = resp.headers_mut();
-        h.append(
-            "Location",
-            format!("/{}/{}/{}/index.html", krate, version, flavor)
-                .try_into()
-                .unwrap(),
-        );
-
-        Ok(resp)
+        self.resp_redirect(&format!("/{}/{}/{}/index.html", krate, version, flavor))
     }
 
     async fn serve_inner(&self, req: Request<Body>) -> anyhow::Result<Response<Body>> {
