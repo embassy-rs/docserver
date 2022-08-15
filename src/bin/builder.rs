@@ -111,6 +111,15 @@ fn calc_flavors(manifest: &manifest::Manifest) -> Vec<Flavor> {
     let docs = &manifest.package.metadata.embassy_docs;
 
     let mut flavors = Vec::new();
+
+    if docs.flavors.is_empty() {
+        flavors.push(Flavor {
+            name: "default".to_string(),
+            features: vec![],
+            target: docs.target.clone().unwrap(),
+        })
+    }
+
     for rule in &docs.flavors {
         let mut name_feats: Vec<(String, Vec<String>)> = Vec::new();
         match (&rule.name, &rule.regex_feature) {
@@ -132,10 +141,12 @@ fn calc_flavors(manifest: &manifest::Manifest) -> Vec<Flavor> {
             flavors.push(Flavor {
                 name,
                 features,
-                target: rule.target.clone(),
+                target: rule.target.clone().or(docs.target.clone()).unwrap(),
             })
         }
     }
+
+    assert!(!flavors.is_empty());
 
     flavors
 }

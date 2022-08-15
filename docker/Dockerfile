@@ -1,4 +1,4 @@
-FROM scratch
+FROM alpine:3.16
 
 COPY rootfs /app
 WORKDIR /app

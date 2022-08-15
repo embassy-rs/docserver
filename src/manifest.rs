@@ -95,6 +95,8 @@ pub struct Docs {
     #[serde(default)]
     pub flavors: Vec<DocsFlavor>,
     #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
     pub features: Vec<String>,
     #[serde(default)]
     pub src_base: String,
@@ -110,5 +112,6 @@ pub struct DocsFlavor {
 
     #[serde(default)]
     pub features: Vec<String>,
-    pub target: String,
+    #[serde(default)]
+    pub target: Option<String>,
 }

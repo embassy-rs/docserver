@@ -1,4 +1,8 @@
-curl -sfL https://get.k3s.io | sh -
+cat > /etc/rancher/k3s/config.yaml <<EOF
+disable: servicelb,metrics-server
+EOF
+
+curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=latest sh -
 
 cat > /etc/sysctl.d/ports.conf <<EOF
 net.ipv4.ip_unprivileged_port_start=0
@@ -33,8 +37,16 @@ spec:
       enabled: false
     hostNetwork: true
     ports:
+      dns-udp:
+        port: 53
+        protocol: UDP
+      dns-tcp:
+        port: 53
       web:
         port: 80
       websecure:
         port: 443
 EOF
+
+# to upgrade, just rerun
+# curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=latest sh -
