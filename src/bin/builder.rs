@@ -13,12 +13,9 @@ use crossbeam::thread;
 use regex::bytes::Regex as ByteRegex;
 use regex::Regex;
 
-#[path = "../manifest.rs"]
-mod manifest;
-#[path = "../zup/mod.rs"]
-mod zup;
-
-use zup::write::*;
+use docserver::manifest;
+use docserver::zup;
+use docserver::zup::write::*;
 
 fn pack_config(crate_name: &str) -> PackConfig {
     let crate_name = crate_name.replace('-', "_");

@@ -12,15 +12,9 @@ use std::io::{self, ErrorKind};
 use std::path::PathBuf;
 use std::{env, fs};
 use tera::{Context, Tera};
-use zup::read::Node;
 
-use crate::zup::read::Reader;
-
-#[path = "../zup/mod.rs"]
-mod zup;
-
-#[path = "../manifest.rs"]
-mod manifest;
+use docserver::manifest;
+use docserver::zup::read::{Node, Reader};
 
 fn extension(path: &str) -> &str {
     match path.rfind('.') {
@@ -169,7 +163,7 @@ impl Thing {
         if krate == None {
             krate = cookies.get(&"crate".to_string()).map(|s| s.as_str());
         }
-        let krate = krate.unwrap_or("embassy");
+        let krate = krate.unwrap_or("embassy-util");
 
         // Version
         let versions = self.list_versions(krate)?;

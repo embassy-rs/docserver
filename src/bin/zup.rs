@@ -7,10 +7,8 @@ use std::path::PathBuf;
 use zup::layout;
 use zup::read::Node;
 
-use crate::zup::read::Reader;
-
-#[path = "../zup/mod.rs"]
-mod zup;
+use docserver::zup;
+use docserver::zup::read::Reader;
 
 struct Walker {
     files: usize,
@@ -28,11 +26,11 @@ impl Walker {
     }
 
     pub fn walk(&mut self, n: Node<'_>, path: String) {
-        //if !self.visited.insert(n.node()) {
-        //    return;
-        //}
+        if !self.visited.insert(n.node()) {
+            return;
+        }
 
-        //println!("{}", path);
+        println!("{}", path);
         match n {
             Node::Directory(n) => {
                 for (name, c) in n.children().unwrap() {
@@ -53,7 +51,7 @@ impl Walker {
 pub fn main() {
     pretty_env_logger::init();
 
-    let zup = Reader::new("./webroot/crates/embassy/0.1.0.zup").unwrap();
+    let zup = Reader::new("./webroot/crates/embassy-stm32/git.zup").unwrap();
 
     let mut w = Walker::new();
     w.walk(zup.root_node(), "extract".to_string());
