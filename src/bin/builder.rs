@@ -96,8 +96,6 @@ struct Flavor {
     target: String,
 }
 
-const NUM_THREADS: usize = 4;
-
 fn load_manifest_bytes(crate_path: &Path) -> Vec<u8> {
     let manifest_path = crate_path.join("Cargo.toml");
     fs::read(&manifest_path).unwrap()
@@ -170,6 +168,14 @@ fn main() -> io::Result<()> {
     let mut zup_tree = zup::write::Tree::new();
     let mut zup_flavors = Vec::new();
 
+    let mut num_threads = 1usize;
+    if let Ok(v) = env::var("BUILDER_THREADS") {
+        if let Ok(n) = v.parse() {
+            num_threads = n;
+        }
+    }
+    println!("using {} threads", num_threads);
+
     let args: Vec<_> = env::args().collect();
     let crate_path = PathBuf::from(&args[1]);
     let output_path = PathBuf::from(&args[2]);
@@ -197,7 +203,7 @@ fn main() -> io::Result<()> {
 
     thread::scope(|s| {
         // Spawn workers
-        for i in 0..NUM_THREADS {
+        for i in 0..num_threads {
             let j = i;
             let rx = &rx;
             let crate_path = &crate_path;
