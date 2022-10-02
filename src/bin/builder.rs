@@ -113,7 +113,7 @@ fn calc_flavors(manifest: &manifest::Manifest) -> Vec<Flavor> {
     if docs.flavors.is_empty() {
         flavors.push(Flavor {
             name: "default".to_string(),
-            features: vec![],
+            features: docs.features.clone(),
             target: docs.target.clone().unwrap(),
         })
     }
