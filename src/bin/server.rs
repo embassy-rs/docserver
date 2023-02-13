@@ -233,6 +233,17 @@ impl Thing {
                     x => x?,
                 };
 
+                // redirect remove extra crate name in path.
+                if path.len() > 3 && path[3] == &krate.replace('-', "_") {
+                    return self.resp_redirect(&format!(
+                        "/{}/{}/{}/{}",
+                        krate,
+                        version,
+                        flavor,
+                        path[4..].join("/")
+                    ));
+                }
+
                 let mut zup_path = vec!["flavors"];
                 zup_path.extend_from_slice(&path[2..]);
                 let mut data = match zup.read(&zup_path) {
@@ -265,12 +276,6 @@ impl Thing {
                         .replace_all(&data, |c: &Captures| {
                             let attr = c.get(1).unwrap().as_bytes();
                             let mut link = c.get(2).unwrap().as_bytes().to_vec();
-
-                            if link.starts_with(b"/__DOCSERVER_STATIC") {
-                                let mut link2 = b"/static".to_vec();
-                                link2.extend_from_slice(&link[19..]);
-                                link = link2
-                            }
 
                             if link.starts_with(b"/__DOCSERVER_SRCLINK/") {
                                 let link_path = std::str::from_utf8(&link[21..]).unwrap();

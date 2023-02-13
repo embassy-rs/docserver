@@ -25,11 +25,12 @@ fn pack_config(crate_name: &str) -> PackConfig {
 
     // Remove srclinks that point to a file starting with `_`.
     let re_remove_hidden_src =
-        ByteRegex::new("<a class=\"srclink\" href=\"[^\"]*/_[^\"]*\">source</a>").unwrap();
+        ByteRegex::new("<a class=\"srclink[a-zA-Z0-9 ]*\" href=\"[^\"]*/_[^\"]*\">source</a>")
+            .unwrap();
 
     // Rewrite srclinks from `../../crate_name/foo" to "/__DOCSERVER_SRCLINK/foo".
     let re_rewrite_src = ByteRegex::new(&format!(
-        "<a class=\"srclink\" href=\"(\\.\\./)+src/{}",
+        "<a class=\"srclink([a-zA-Z0-9 ]*)\" href=\"(\\.\\./)+src/{}",
         &crate_name
     ))
     .unwrap();
@@ -40,10 +41,6 @@ fn pack_config(crate_name: &str) -> PackConfig {
 
     // Rewrite links from `../crate_name" to "".
     let re_rewrite_root = ByteRegex::new(&format!("\\.\\./{}/", &crate_name)).unwrap();
-
-    // Rewrite links from `__REMOVE_NEXT_PATH_COMPONENT__/blah" to "".
-    let re_remove_next_path_component =
-        ByteRegex::new("__REMOVE_NEXT_PATH_COMPONENT__/[a-zA-Z0-9_-]+/").unwrap();
 
     let re_fix_root_path = ByteRegex::new("data-root-path=\"\\.\\./").unwrap();
 
@@ -70,13 +67,10 @@ fn pack_config(crate_name: &str) -> PackConfig {
                         .as_bytes(),
                     )
                     .into_owned();
-                let res = re_remove_next_path_component
-                    .replace_all(&res, &[][..])
-                    .into_owned();
                 let res = re_rewrite_src
                     .replace_all(
                         &res,
-                        &b"<a class=\"srclink\" href=\"/__DOCSERVER_SRCLINK"[..],
+                        &b"<a class=\"srclink$1\" href=\"/__DOCSERVER_SRCLINK"[..],
                     )
                     .into_owned();
                 let res = re_rewrite_root.replace_all(&res, &[][..]).into_owned();
@@ -236,7 +230,7 @@ fn main() -> io::Result<()> {
                         "-Zunstable-options",
                         "--disable-per-crate-search",
                         "--static-root-path",
-                        "/__DOCSERVER_STATIC/",
+                        "/static/",
                     ]);
 
                     for (dep_name, dep) in &manifest.dependencies {
@@ -269,22 +263,7 @@ fn main() -> io::Result<()> {
                     let doc_crate_dir = doc_dir.join(crate_name.replace('-', "_"));
 
                     let bytes = fs::read(doc_dir.join("search-index.js")).unwrap();
-                    fs::write(
-                        doc_crate_dir.join("search-index.js"),
-                        &bytes
-                    )
-                    .unwrap();
-
-
-                    // monkeypatch search.js to remove the crate name from the path.
-                    let js = fs::read(doc_dir.join("search.js")).unwrap();
-                    let monkeypatch = ByteRegex::new("return\\[displayPath,href\\]").unwrap();
-                    let js = monkeypatch.replace_all(&js, &b"href=href.slice(ROOT_PATH.length);href=ROOT_PATH+href.slice(href.indexOf('/')+1);return[displayPath,href]"[..]);
-                    fs::write(
-                        doc_crate_dir.join("search.js"),
-                        &js
-                    )
-                    .unwrap();
+                    fs::write(doc_crate_dir.join("search-index.js"), &bytes).unwrap();
 
                     let dir = zup_tree
                         .pack(&doc_crate_dir, &pack_config)
