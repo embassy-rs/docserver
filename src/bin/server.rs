@@ -345,7 +345,6 @@ impl Thing {
 
                 Ok(resp)
             }
-            _ => self.resp_404(),
         }
     }
 
