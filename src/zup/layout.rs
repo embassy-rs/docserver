@@ -50,7 +50,7 @@ pub const VERSION: u32 = 1;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct Superblock {
-    pub dict: Range,
+    pub dict: Option<Range>,
     pub root: Node,
     pub version: u32,
     pub magic: u32,
@@ -64,7 +64,7 @@ impl Superblock {
         let version = u32::from_le_bytes(b[36..40].try_into().unwrap());
         let magic = u32::from_le_bytes(b[40..44].try_into().unwrap());
         Self {
-            dict,
+            dict: if dict.len == 0 { None } else { Some(dict) },
             root,
             version,
             magic,
@@ -73,7 +73,7 @@ impl Superblock {
 
     pub fn to_bytes(self) -> [u8; Self::LEN] {
         let mut res = [0; Self::LEN];
-        res[0..16].copy_from_slice(&self.dict.to_bytes());
+        res[0..16].copy_from_slice(&self.dict.unwrap_or(Range { offset: 0, len: 0 }).to_bytes());
         res[16..36].copy_from_slice(&self.root.to_bytes());
         res[36..40].copy_from_slice(&self.version.to_le_bytes());
         res[40..44].copy_from_slice(&self.magic.to_le_bytes());

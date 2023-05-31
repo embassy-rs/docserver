@@ -1,3 +1,4 @@
+use rand::seq::SliceRandom;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -7,9 +8,6 @@ use std::path::Path;
 use zstd::block::Compressor;
 
 use super::layout;
-
-const COMPRESSION_LEVEL: i32 = 7;
-const DICTIONARY_SIZE: usize = 163840;
 
 #[derive(PartialEq, Eq, Clone, Copy, Hash, Debug)]
 pub struct NodeId(u64);
@@ -52,6 +50,12 @@ impl Node {
 pub struct PackConfig {
     pub data_filter: Box<dyn Fn(&Path, &mut Vec<u8>)>,
     pub file_filter: Box<dyn Fn(&Path) -> bool>,
+}
+
+pub struct CompressConfig {
+    pub level: i32,
+    pub dict_size: usize,
+    pub dict_train_size: usize,
 }
 
 pub struct Tree {
@@ -143,24 +147,42 @@ impl Tree {
         id
     }
 
-    pub fn write(&mut self, path: &Path, root: NodeId) -> io::Result<()> {
-        let mut f = fs::File::create(path)?;
+    pub fn write(
+        &mut self,
+        path: &Path,
+        root: NodeId,
+        compress: Option<CompressConfig>,
+    ) -> io::Result<()> {
+        let f = fs::File::create(path)?;
 
-        // Train dictionary
-        let files: Vec<&[u8]> = self
-            .nodes
-            .iter()
-            .filter_map(|(_, n)| match n {
-                Node::File(f) => Some(&f.data[..]),
-                _ => None,
-            })
-            .collect();
-        let dict = zstd::dict::from_samples(&files, DICTIONARY_SIZE).unwrap();
-        let comp = zstd::block::Compressor::with_dict(dict.clone());
+        let comp = compress.map(|compress| {
+            println!("compressing...");
+            let mut files: Vec<&[u8]> = self
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| match n {
+                    Node::File(f) => Some(&f.data[..]),
+                    _ => None,
+                })
+                .collect();
+            files.shuffle(&mut rand::thread_rng());
+            let mut len = 0;
+            let mut i = 0;
+            while len < compress.dict_train_size && i < files.len() {
+                len += files[i].len();
+                i += 1;
+            }
+            let dict = zstd::dict::from_samples(&files[..i], compress.dict_size).unwrap();
+            WriterCompress {
+                c: zstd::block::Compressor::with_dict(dict.clone()),
+                dict,
+                level: compress.level,
+            }
+        });
 
         // Write stuff
         let mut w = Writer {
-            f: &mut f,
+            f,
             comp,
             nodes: HashMap::new(),
             offset: 0,
@@ -168,16 +190,7 @@ impl Tree {
         };
 
         let root = w.write(root)?;
-        let dict_range = w.write_data(&dict)?;
-
-        let superblock = layout::Superblock {
-            version: layout::VERSION,
-            magic: layout::MAGIC,
-            dict: dict_range,
-            root,
-        };
-        f.write_all(&superblock.to_bytes())?;
-        f.sync_all()?;
+        w.finish(root)?;
 
         Ok(())
     }
@@ -185,10 +198,16 @@ impl Tree {
 
 struct Writer<'a> {
     tree: &'a Tree,
-    f: &'a mut fs::File,
+    f: fs::File,
     nodes: HashMap<NodeId, layout::Node>,
     offset: u64,
-    comp: Compressor,
+    comp: Option<WriterCompress>,
+}
+
+struct WriterCompress {
+    c: Compressor,
+    dict: Vec<u8>,
+    level: i32,
 }
 
 impl<'a> Writer<'a> {
@@ -222,10 +241,12 @@ impl<'a> Writer<'a> {
         let mut flags = 0;
         let mut buf: Cow<[u8]> = buf.into();
 
-        if let Ok(cdata) = self.comp.compress(&buf, COMPRESSION_LEVEL) {
-            if cdata.len() < buf.len() {
-                buf = cdata.into();
-                flags = layout::FLAG_COMPRESSED;
+        if let Some(comp) = &mut self.comp {
+            if let Ok(cdata) = comp.c.compress(&buf, comp.level) {
+                if cdata.len() < buf.len() {
+                    buf = cdata.into();
+                    flags = layout::FLAG_COMPRESSED;
+                }
             }
         }
 
@@ -241,5 +262,23 @@ impl<'a> Writer<'a> {
         };
         self.offset += res.len;
         Ok(res)
+    }
+
+    fn finish(mut self, root: layout::Node) -> io::Result<()> {
+        let dict_range = match &self.comp {
+            Some(comp) => Some(self.write_data(&comp.dict.clone())?),
+            None => None,
+        };
+
+        let superblock = layout::Superblock {
+            version: layout::VERSION,
+            magic: layout::MAGIC,
+            dict: dict_range,
+            root,
+        };
+
+        self.f.write_all(&superblock.to_bytes())?;
+        self.f.sync_all()?;
+        Ok(())
     }
 }

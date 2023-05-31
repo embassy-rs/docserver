@@ -14,7 +14,7 @@ use super::layout;
 pub struct Reader {
     m: Mmap,
     superblock: layout::Superblock,
-    dict: DecoderDictionary<'static>,
+    dict: Option<DecoderDictionary<'static>>,
 }
 
 impl Reader {
@@ -26,8 +26,10 @@ impl Reader {
             m[m.len() - layout::Superblock::LEN..].try_into().unwrap(),
         );
 
-        let dict = Self::read_range(&m, superblock.dict);
-        let dict = DecoderDictionary::copy(dict);
+        let dict = superblock.dict.map(|dict| {
+            let dict = Self::read_range(&m, dict);
+            DecoderDictionary::copy(dict)
+        });
 
         Ok(Self {
             m,
@@ -45,8 +47,14 @@ impl Reader {
     fn read_node(&self, node: layout::Node) -> io::Result<Cow<[u8]>> {
         let data = Self::read_range(&self.m, node.range);
         if node.flags & layout::FLAG_COMPRESSED != 0 {
+            let Some(dict) = &self.dict else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "node is compressed, but zup has no dictionary",
+                ));
+            };
             let mut res = Vec::new();
-            let mut dec = Decoder::with_prepared_dictionary(data.deref(), &self.dict)?;
+            let mut dec = Decoder::with_prepared_dictionary(data.deref(), dict)?;
             dec.read_to_end(&mut res)?;
             Ok(Cow::Owned(res))
         } else {

@@ -1,12 +1,12 @@
 #![feature(io_error_more)]
 
-use std::env::{self};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::Mutex;
 use std::{fs, io};
 
+use clap::Parser;
 use crossbeam::channel::unbounded;
 use crossbeam::thread;
 use regex::bytes::Regex as ByteRegex;
@@ -157,30 +157,54 @@ fn match_flavor<'a>(local: &Flavor, dep: &'a [Flavor]) -> Option<&'a Flavor> {
     dep.get(0)
 }
 
+#[derive(clap::Parser)]
+#[clap(version = "1.0", author = "Dario Nieuwenhuis <dirbaio@dirbaio.net>")]
+struct Cli {
+    /// Input crate directory (the directory containing the Cargo.toml)
+    #[clap(short)]
+    input: PathBuf,
+
+    /// Output .zup
+    #[clap(short)]
+    output: PathBuf,
+
+    /// Compress output with zstd
+    #[clap(short, env = "BUILDER_COMPRESS")]
+    compress: bool,
+
+    #[clap(long, default_value = "7", env = "BUILDER_COMPRESS_LEVEL")]
+    compress_level: i32,
+
+    /// Compress dictionary size
+    #[clap(long, default_value = "163840", env = "BUILDER_DICT_SIZE")]
+    dict_size: usize,
+
+    /// Compress dictionary training set max size
+    #[clap(long, default_value = "100000000", env = "BUILDER_DICT_TRAIN_SIZE")]
+    dict_train_size: usize,
+
+    /// Compress dictionary training set max size
+    #[clap(short = 'j', env = "BUILDER_THREADS")]
+    num_threads: Option<usize>,
+}
+
 fn main() -> io::Result<()> {
+    let cli = Cli::parse();
+
     let mut zup_tree = zup::write::Tree::new();
     let mut zup_flavors = Vec::new();
 
-    let mut num_threads = 1usize;
-    if let Ok(v) = env::var("BUILDER_THREADS") {
-        if let Ok(n) = v.parse() {
-            num_threads = n;
-        }
-    }
+    let num_threads = cli.num_threads.unwrap_or(1);
     println!("using {} threads", num_threads);
-
-    let args: Vec<_> = env::args().collect();
-    let crate_path = PathBuf::from(&args[1]);
-    let output_path = PathBuf::from(&args[2]);
 
     let m = Mutex::new((&mut zup_tree, &mut zup_flavors));
 
-    let manifest_bytes = load_manifest_bytes(&crate_path);
-    let manifest = load_manifest(&crate_path);
+    let manifest_bytes = load_manifest_bytes(&cli.input);
+    let manifest = load_manifest(&cli.input);
 
     let mut cmd = Command::new("git");
     cmd.args(&["rev-parse", "HEAD"]);
-    cmd.current_dir(&crate_path);
+    cmd.current_dir(&cli.input);
     let output = cmd.output().unwrap();
     assert!(output.status.success());
     let docserver_info = manifest::DocserverInfo {
@@ -199,7 +223,7 @@ fn main() -> io::Result<()> {
         for i in 0..num_threads {
             let j = i;
             let rx = &rx;
-            let crate_path = &crate_path;
+            let crate_path = &cli.input;
             let manifest = &manifest;
             let m = &m;
             s.spawn(move |_| {
@@ -284,13 +308,12 @@ fn main() -> io::Result<()> {
     })
     .unwrap();
 
-    if let Some(p) = output_path.parent() {
+    if let Some(p) = cli.output.parent() {
         let _ = fs::create_dir_all(p);
     }
 
     println!("total nodes: {}", zup_tree.node_count());
     println!("total bytes: {}", zup_tree.total_bytes());
-    println!("compressing...");
 
     let zup_flavors = zup_tree.add_node(Node::Directory(Directory {
         entries: zup_flavors,
@@ -318,7 +341,12 @@ fn main() -> io::Result<()> {
     });
 
     let zup_root = zup_tree.add_node(zup_root);
-    zup_tree.write(&output_path, zup_root)?;
+    let compress = cli.compress.then(|| CompressConfig {
+        level: cli.compress_level,
+        dict_size: cli.dict_size,
+        dict_train_size: cli.dict_train_size,
+    });
+    zup_tree.write(&cli.output, zup_root, compress)?;
 
     Ok(())
 }
