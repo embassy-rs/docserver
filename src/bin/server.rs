@@ -1,5 +1,4 @@
 #![feature(io_error_more)]
-#![feature(let_else)]
 
 use hyper::header::HeaderValue;
 use hyper::service::{make_service_fn, service_fn};

@@ -1,5 +1,4 @@
 #![feature(io_error_more)]
-#![feature(let_else)]
 
 use std::collections::HashSet;
 use std::fs;
