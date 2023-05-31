@@ -168,6 +168,10 @@ struct Cli {
     #[clap(short)]
     output: PathBuf,
 
+    /// Output directory containing static files.
+    #[clap(long)]
+    output_static: Option<PathBuf>,
+
     /// Compress output with zstd
     #[clap(short, env = "BUILDER_COMPRESS")]
     compress: bool,
@@ -217,6 +221,9 @@ fn main() -> io::Result<()> {
         tx.send(flavor).unwrap();
     }
     drop(tx);
+
+    let statics_copied: &Mutex<bool> = &Mutex::new(false);
+    let static_path = &cli.output_static;
 
     thread::scope(|s| {
         // Spawn workers
@@ -302,6 +309,28 @@ fn main() -> io::Result<()> {
                     //fs::remove_dir_all(doc_dir.join("implementors")).unwrap();
                     //fs::remove_file(doc_dir.join("crates.js")).unwrap();
                     //fs::remove_file(doc_dir.join("source-files.js")).unwrap();
+
+                    if let Some(static_path) = static_path {
+                        let copy_done =
+                            std::mem::replace(&mut *statics_copied.lock().unwrap(), true);
+                        if !copy_done {
+                            fs::create_dir_all(static_path).unwrap();
+                            // recursive copy
+                            let mut stack = vec![doc_dir.join("static.files")];
+                            while let Some(path) = stack.pop() {
+                                if path.is_dir() {
+                                    for entry in fs::read_dir(path).unwrap() {
+                                        stack.push(entry.unwrap().path());
+                                    }
+                                } else {
+                                    let rel_path = path.strip_prefix(&doc_dir).unwrap();
+                                    let target_path = static_path.join(rel_path);
+                                    let _ = fs::create_dir_all(target_path.parent().unwrap());
+                                    fs::copy(path, target_path).unwrap();
+                                }
+                            }
+                        }
+                    }
                 }
             });
         }
