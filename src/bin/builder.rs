@@ -316,14 +316,15 @@ fn main() -> io::Result<()> {
                         if !copy_done {
                             fs::create_dir_all(static_path).unwrap();
                             // recursive copy
-                            let mut stack = vec![doc_dir.join("static.files")];
+                            let doc_static_dir = doc_dir.join("static.files");
+                            let mut stack = vec![doc_static_dir.clone()];
                             while let Some(path) = stack.pop() {
                                 if path.is_dir() {
                                     for entry in fs::read_dir(path).unwrap() {
                                         stack.push(entry.unwrap().path());
                                     }
                                 } else {
-                                    let rel_path = path.strip_prefix(&doc_dir).unwrap();
+                                    let rel_path = path.strip_prefix(&doc_static_dir).unwrap();
                                     let target_path = static_path.join(rel_path);
                                     let _ = fs::create_dir_all(target_path.parent().unwrap());
                                     fs::copy(path, target_path).unwrap();
