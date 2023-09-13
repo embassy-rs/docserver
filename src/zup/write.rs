@@ -1,7 +1,6 @@
 use rand::seq::SliceRandom;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::{self};
 use std::io::{self, Write};
@@ -29,73 +28,6 @@ pub struct DirectoryEntry {
     pub node_id: NodeId,
 }
 
-pub struct File {
-    contents: RefCell<PathOrData>,
-}
-
-impl File {
-    pub fn from_data(data: Vec<u8>) -> Self {
-        Self {
-            contents: RefCell::new(PathOrData::Data(Arc::new(data))),
-        }
-    }
-
-    pub fn from_path(
-        path: PathBuf,
-        data_filter: Arc<dyn Fn(&Path, &mut Vec<u8>) + Sync + Send>,
-        len: usize,
-    ) -> Self {
-        Self {
-            contents: RefCell::new(PathOrData::Path((path, Mutex::new(data_filter), len))),
-        }
-    }
-
-    fn len(&self) -> usize {
-        match &*self.contents.borrow() {
-            PathOrData::Path((_, _, len)) => *len,
-            PathOrData::Data(data) => data.len(),
-            _ => unreachable!(),
-        }
-    }
-
-    fn data(&self) -> io::Result<FileData> {
-        {
-            let mut contents = self.contents.borrow_mut();
-
-            if let PathOrData::Path((path, data_filter, _)) = &*contents {
-                let mut data = fs::read(&path)?;
-                {
-                    let data_filter = data_filter.lock().unwrap();
-                    (data_filter)(&path, &mut data);
-                }
-
-                *contents = PathOrData::Data(Arc::new(data));
-            }
-        }
-
-        let contents = self.contents.borrow();
-
-        match &*contents {
-            PathOrData::Data(data) => Ok(FileData(data.clone())),
-            _ => unreachable!(),
-        }
-    }
-
-    fn reset(&self) {
-        let mut contents = self.contents.borrow_mut();
-
-        *contents = PathOrData::None;
-    }
-}
-
-pub struct FileData(Arc<Vec<u8>>);
-
-impl AsRef<[u8]> for FileData {
-    fn as_ref(&self) -> &[u8] {
-        &*self.0
-    }
-}
-
 enum PathOrData {
     Path(
         (
@@ -105,7 +37,58 @@ enum PathOrData {
         ),
     ),
     Data(Arc<Vec<u8>>),
-    None,
+}
+
+pub struct File {
+    contents: PathOrData,
+}
+
+impl File {
+    pub fn from_data(data: Vec<u8>) -> Self {
+        Self {
+            contents: PathOrData::Data(Arc::new(data)),
+        }
+    }
+
+    pub fn from_path(
+        path: PathBuf,
+        data_filter: Arc<dyn Fn(&Path, &mut Vec<u8>) + Sync + Send>,
+        len: usize,
+    ) -> Self {
+        Self {
+            contents: PathOrData::Path((path, Mutex::new(data_filter), len)),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.contents {
+            PathOrData::Path((_, _, len)) => *len,
+            PathOrData::Data(data) => data.len(),
+        }
+    }
+
+    fn data(&self) -> io::Result<FileData> {
+        match &self.contents {
+            PathOrData::Path((path, data_filter, _)) => {
+                let mut data = fs::read(&path)?;
+                {
+                    let data_filter = data_filter.lock().unwrap();
+                    (data_filter)(&path, &mut data);
+                }
+
+                Ok(FileData(Arc::new(data)))
+            }
+            PathOrData::Data(data) => Ok(FileData(data.clone())),
+        }
+    }
+}
+
+pub struct FileData(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for FileData {
+    fn as_ref(&self) -> &[u8] {
+        &*self.0
+    }
 }
 
 impl Node {
@@ -140,14 +123,18 @@ pub struct Tree {
     nodes: HashMap<NodeId, Node>,
     hash_dedup: HashMap<[u8; 32], NodeId>,
     next_id: u64,
+    work_dir: PathBuf,
+    next_dir: u64,
 }
 
 impl Tree {
-    pub fn new() -> Self {
+    pub fn new(work_dir: PathBuf) -> Self {
         Self {
             nodes: HashMap::new(),
             hash_dedup: HashMap::new(),
             next_id: 0,
+            work_dir: work_dir,
+            next_dir: 0,
         }
     }
 
@@ -176,6 +163,24 @@ impl Tree {
         file_filter: &Box<dyn Fn(&Path) -> bool>,
         data_filter: &Arc<dyn Fn(&Path, &mut Vec<u8>) + Send + Sync>,
     ) -> io::Result<Option<NodeId>> {
+        let to = self
+            .work_dir
+            .join(self.next_dir.to_string())
+            .join(path.file_name().unwrap());
+
+        fs::create_dir_all(to.parent().unwrap())?;
+        fs::rename(path, &to)?;
+
+        self.next_dir += 1;
+        self.pack_inner(&to, file_filter, data_filter)
+    }
+
+    fn pack_inner(
+        &mut self,
+        path: &Path,
+        file_filter: &Box<dyn Fn(&Path) -> bool>,
+        data_filter: &Arc<dyn Fn(&Path, &mut Vec<u8>) + Send + Sync>,
+    ) -> io::Result<Option<NodeId>> {
         let path = path.canonicalize()?;
 
         let m = fs::metadata(&path)?;
@@ -195,7 +200,7 @@ impl Tree {
                     continue;
                 }
 
-                let Some(node_id) = self.pack(&child, &file_filter, &data_filter)? else {
+                let Some(node_id) = self.pack_inner(&child, &file_filter, &data_filter)? else {
                     continue;
                 };
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -279,6 +284,8 @@ impl Tree {
         let root = w.write(root)?;
         w.finish(root)?;
 
+        fs::remove_dir_all(&self.work_dir)?;
+
         Ok(())
     }
 }
@@ -319,7 +326,6 @@ impl<'a> Writer<'a> {
             }
             Node::File(file) => {
                 let result = self.write_node(file.data().unwrap())?;
-                file.reset(); // Hack to drop the data without having to restructure the recursion
 
                 result
             }

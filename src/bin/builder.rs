@@ -195,7 +195,7 @@ struct Cli {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    let mut zup_tree = zup::write::Tree::new();
+    let mut zup_tree = zup::write::Tree::new(PathBuf::from("zup_tree_work"));
     let mut zup_flavors = Vec::new();
 
     let num_threads = cli.num_threads.unwrap_or(1);
