@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::{fs, io};
 
 use clap::Parser;
@@ -195,7 +195,7 @@ struct Cli {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    let mut zup_tree = zup::write::Tree::new();
+    let mut zup_tree = zup::write::Tree::new(PathBuf::from("zup_tree_work"));
     let mut zup_flavors = Vec::new();
 
     let num_threads = cli.num_threads.unwrap_or(1);
@@ -237,6 +237,9 @@ fn main() -> io::Result<()> {
                 let crate_name = &manifest.package.name;
                 let pack_config = pack_config(crate_name);
                 let target_dir = format!("target_doc/work{}", j);
+
+                let file_filter = pack_config.file_filter;
+                let data_filter = Arc::from(pack_config.data_filter);
 
                 while let Ok(flavor) = rx.recv() {
                     println!("documenting {:?} ...", flavor);
@@ -296,7 +299,7 @@ fn main() -> io::Result<()> {
                     fs::write(doc_crate_dir.join("search-index.js"), &bytes).unwrap();
 
                     let dir = zup_tree
-                        .pack(&doc_crate_dir, &pack_config)
+                        .pack(&doc_crate_dir, &file_filter, &data_filter)
                         .unwrap()
                         .unwrap();
                     zup_flavors.push(DirectoryEntry {
@@ -357,15 +360,11 @@ fn main() -> io::Result<()> {
             },
             DirectoryEntry {
                 name: "Cargo.toml".to_string(),
-                node_id: zup_tree.add_node(Node::File(File {
-                    data: manifest_bytes,
-                })),
+                node_id: zup_tree.add_node(Node::File(File::from_data(manifest_bytes))),
             },
             DirectoryEntry {
                 name: "info.json".to_string(),
-                node_id: zup_tree.add_node(Node::File(File {
-                    data: docserver_info_bytes,
-                })),
+                node_id: zup_tree.add_node(Node::File(File::from_data(docserver_info_bytes))),
             },
         ],
     });

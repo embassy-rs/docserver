@@ -4,7 +4,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::Mutex;
 use zstd::block::Compressor;
 
 use super::layout;
@@ -26,15 +28,74 @@ pub struct DirectoryEntry {
     pub node_id: NodeId,
 }
 
+enum PathOrData {
+    Path(
+        (
+            PathBuf,
+            Mutex<Arc<dyn Fn(&Path, &mut Vec<u8>) + Sync + Send>>,
+            usize,
+        ),
+    ),
+    Data(Arc<Vec<u8>>),
+}
+
 pub struct File {
-    pub data: Vec<u8>,
+    contents: PathOrData,
+}
+
+impl File {
+    pub fn from_data(data: Vec<u8>) -> Self {
+        Self {
+            contents: PathOrData::Data(Arc::new(data)),
+        }
+    }
+
+    pub fn from_path(
+        path: PathBuf,
+        data_filter: Arc<dyn Fn(&Path, &mut Vec<u8>) + Sync + Send>,
+        len: usize,
+    ) -> Self {
+        Self {
+            contents: PathOrData::Path((path, Mutex::new(data_filter), len)),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.contents {
+            PathOrData::Path((_, _, len)) => *len,
+            PathOrData::Data(data) => data.len(),
+        }
+    }
+
+    fn data(&self) -> io::Result<FileData> {
+        match &self.contents {
+            PathOrData::Path((path, data_filter, _)) => {
+                let mut data = fs::read(&path)?;
+                {
+                    let data_filter = data_filter.lock().unwrap();
+                    (data_filter)(&path, &mut data);
+                }
+
+                Ok(FileData(Arc::new(data)))
+            }
+            PathOrData::Data(data) => Ok(FileData(data.clone())),
+        }
+    }
+}
+
+pub struct FileData(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for FileData {
+    fn as_ref(&self) -> &[u8] {
+        &*self.0
+    }
 }
 
 impl Node {
-    fn hash(&self) -> [u8; 32] {
+    fn hash(&mut self) -> [u8; 32] {
         let mut hash = Sha256::new();
         match self {
-            Self::File(file) => hash.update(&file.data),
+            Self::File(file) => hash.update(file.data().unwrap()),
             Self::Directory(dir) => {
                 for entry in &dir.entries {
                     hash.update(entry.name.len().to_le_bytes());
@@ -48,7 +109,7 @@ impl Node {
 }
 
 pub struct PackConfig {
-    pub data_filter: Box<dyn Fn(&Path, &mut Vec<u8>)>,
+    pub data_filter: Box<dyn Fn(&Path, &mut Vec<u8>) + Send + Sync>,
     pub file_filter: Box<dyn Fn(&Path) -> bool>,
 }
 
@@ -62,14 +123,18 @@ pub struct Tree {
     nodes: HashMap<NodeId, Node>,
     hash_dedup: HashMap<[u8; 32], NodeId>,
     next_id: u64,
+    work_dir: PathBuf,
+    next_dir: u64,
 }
 
 impl Tree {
-    pub fn new() -> Self {
+    pub fn new(work_dir: PathBuf) -> Self {
         Self {
             nodes: HashMap::new(),
             hash_dedup: HashMap::new(),
             next_id: 0,
+            work_dir: work_dir,
+            next_dir: 0,
         }
     }
 
@@ -81,7 +146,7 @@ impl Tree {
         self.nodes
             .iter()
             .map(|(_, n)| match n {
-                Node::File(f) => f.data.len(),
+                Node::File(f) => f.len(),
                 _ => 0,
             })
             .sum()
@@ -92,7 +157,30 @@ impl Tree {
         NodeId(self.next_id)
     }
 
-    pub fn pack(&mut self, path: &Path, config: &PackConfig) -> io::Result<Option<NodeId>> {
+    pub fn pack(
+        &mut self,
+        path: &Path,
+        file_filter: &Box<dyn Fn(&Path) -> bool>,
+        data_filter: &Arc<dyn Fn(&Path, &mut Vec<u8>) + Send + Sync>,
+    ) -> io::Result<Option<NodeId>> {
+        let to = self
+            .work_dir
+            .join(self.next_dir.to_string())
+            .join(path.file_name().unwrap());
+
+        fs::create_dir_all(to.parent().unwrap())?;
+        fs::rename(path, &to)?;
+
+        self.next_dir += 1;
+        self.pack_inner(&to, file_filter, data_filter)
+    }
+
+    fn pack_inner(
+        &mut self,
+        path: &Path,
+        file_filter: &Box<dyn Fn(&Path) -> bool>,
+        data_filter: &Arc<dyn Fn(&Path, &mut Vec<u8>) + Send + Sync>,
+    ) -> io::Result<Option<NodeId>> {
         let path = path.canonicalize()?;
 
         let m = fs::metadata(&path)?;
@@ -108,12 +196,12 @@ impl Tree {
             for entry in readdir {
                 let child = entry.path();
 
-                if !(config.file_filter)(&child) {
+                if !(file_filter)(&child) {
                     continue;
                 }
 
-                let Some(node_id) = self.pack(&child, config)? else {
-                    continue
+                let Some(node_id) = self.pack_inner(&child, &file_filter, &data_filter)? else {
+                    continue;
                 };
                 let name = entry.file_name().to_string_lossy().to_string();
                 entries.push(DirectoryEntry { name, node_id });
@@ -124,9 +212,11 @@ impl Tree {
             entries.sort_by(|a, b| a.name.cmp(&b.name));
             Node::Directory(Directory { entries })
         } else if m.is_file() {
-            let mut data = fs::read(&path)?;
-            (config.data_filter)(&path, &mut data);
-            Node::File(File { data })
+            Node::File(File::from_path(
+                path.clone(),
+                data_filter.clone(),
+                m.len().try_into().unwrap(),
+            ))
         } else {
             panic!("unknown type {:?} {:?}", path, m);
         };
@@ -134,7 +224,7 @@ impl Tree {
         Ok(Some(self.add_node(node)))
     }
 
-    pub fn add_node(&mut self, node: Node) -> NodeId {
+    pub fn add_node(&mut self, mut node: Node) -> NodeId {
         let hash = node.hash();
         if let Some(id) = self.hash_dedup.get(&hash) {
             return *id;
@@ -157,11 +247,11 @@ impl Tree {
 
         let comp = compress.map(|compress| {
             println!("compressing...");
-            let mut files: Vec<&[u8]> = self
+            let mut files: Vec<_> = self
                 .nodes
                 .iter()
                 .filter_map(|(_, n)| match n {
-                    Node::File(f) => Some(&f.data[..]),
+                    Node::File(f) => Some(f),
                     _ => None,
                 })
                 .collect();
@@ -172,7 +262,9 @@ impl Tree {
                 len += files[i].len();
                 i += 1;
             }
-            let dict = zstd::dict::from_samples(&files[..i], compress.dict_size).unwrap();
+            let files: Vec<_> = files[..i].iter().map(|f| f.data().unwrap()).collect();
+
+            let dict = zstd::dict::from_samples(&files, compress.dict_size).unwrap();
             WriterCompress {
                 c: zstd::block::Compressor::with_dict(dict.clone()),
                 dict,
@@ -191,6 +283,8 @@ impl Tree {
 
         let root = w.write(root)?;
         w.finish(root)?;
+
+        fs::remove_dir_all(&self.work_dir)?;
 
         Ok(())
     }
@@ -230,16 +324,20 @@ impl<'a> Writer<'a> {
                 res.flags |= layout::FLAG_DIR;
                 res
             }
-            Node::File(file) => self.write_node(&file.data)?,
+            Node::File(file) => {
+                let result = self.write_node(file.data().unwrap())?;
+
+                result
+            }
         };
 
         self.nodes.insert(node_id, res);
         Ok(res)
     }
 
-    fn write_node(&mut self, buf: &[u8]) -> io::Result<layout::Node> {
+    fn write_node(&mut self, buf: impl AsRef<[u8]>) -> io::Result<layout::Node> {
         let mut flags = 0;
-        let mut buf: Cow<[u8]> = buf.into();
+        let mut buf: Cow<[u8]> = Cow::Borrowed(buf.as_ref());
 
         if let Some(comp) = &mut self.comp {
             if let Ok(cdata) = comp.c.compress(&buf, comp.level) {
