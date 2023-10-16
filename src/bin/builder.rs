@@ -257,7 +257,6 @@ fn main() -> io::Result<()> {
                         "-Zrustdoc-map",
                         "--",
                         "-Zunstable-options",
-                        "--disable-per-crate-search",
                         "--static-root-path",
                         "/static/",
                     ]);
