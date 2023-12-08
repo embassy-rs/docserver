@@ -278,6 +278,19 @@ impl Thing {
                             ));
                         }
                     }
+                    Err(e) if e.kind() == ErrorKind::IsADirectory => {
+                        return self.resp_redirect(&format!(
+                            "/{}/{}/{}/{}index.html",
+                            krate,
+                            version,
+                            flavor,
+                            path[3..].iter().fold(String::new(), |mut s, p| {
+                                s.push_str(p);
+                                s.push('/');
+                                s
+                            })
+                        ))
+                    }
                     x => x?,
                 }
                 .into_owned();
