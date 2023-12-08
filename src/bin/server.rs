@@ -149,12 +149,7 @@ impl Thing {
         Ok(resp)
     }
 
-    async fn guess_redirect(
-        &self,
-        req: &Request<Body>,
-        mut krate: Option<&str>,
-        mut version: Option<&str>,
-    ) -> anyhow::Result<Response<Body>> {
+    fn cookies(&self, req: &Request<Body>) -> HashMap<String, String> {
         // Parse cookies
         let mut cookies = HashMap::new();
         if let Some(h) = req.headers().get("Cookie") {
@@ -164,6 +159,16 @@ impl Thing {
                 }
             }
         }
+        cookies
+    }
+
+    async fn guess_redirect(
+        &self,
+        req: &Request<Body>,
+        mut krate: Option<&str>,
+        mut version: Option<&str>,
+    ) -> anyhow::Result<Response<Body>> {
+        let cookies = self.cookies(req);
 
         // Crate
         let krates = self.list_crates()?;
@@ -246,7 +251,33 @@ impl Thing {
                 let mut zup_path = vec!["flavors"];
                 zup_path.extend_from_slice(&path[2..]);
                 let mut data = match zup.read(&zup_path) {
-                    Err(e) if e.kind() == ErrorKind::NotFound => return self.resp_404(),
+                    Err(e) if e.kind() == ErrorKind::NotFound => {
+                        // check if it's due to incorrect flavor.
+                        if zup.open(&["flavors", path[3]]).is_ok() {
+                            // if flavor exists, path is wrong, so do 404.
+                            return self.resp_404();
+                        } else {
+                            // flavor doesn't exist, redirect to the default flavor.
+                            let cookies = self.cookies(&req);
+
+                            let flavors = self.list_flavors(krate, version)?;
+                            let flavor = cookies
+                                .get(&format!("crate-{}-flavor", krate))
+                                .map(|s| s.as_str());
+                            let mut flavor = flavor.unwrap_or(&flavors[0]);
+                            if flavors.iter().find(|s| *s == flavor).is_none() {
+                                flavor = &flavors[0];
+                            }
+
+                            return self.resp_redirect(&format!(
+                                "/{}/{}/{}/{}",
+                                krate,
+                                version,
+                                flavor,
+                                path[3..].join("/")
+                            ));
+                        }
+                    }
                     x => x?,
                 }
                 .into_owned();
@@ -283,6 +314,14 @@ impl Thing {
                                 let link_path = link_path[..i].replace(".html", "");
                                 link = format!("{}{}#L{}", srclink_base, link_path, link_fragment)
                                     .into();
+                            }
+
+                            if link.starts_with(b"/__DOCSERVER_DEPLINK/") {
+                                let link_path = std::str::from_utf8(&link[21..]).unwrap();
+                                let (krate, link_path) = link_path.split_once('/').unwrap();
+                                let (_, link_path) = link_path.split_once('/').unwrap();
+
+                                link = format!("/{krate}/git/{flavor}/{link_path}").into();
                             }
 
                             let mut res = Vec::new();
