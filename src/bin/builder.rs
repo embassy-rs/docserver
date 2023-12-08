@@ -27,11 +27,7 @@ fn pack_config(crate_name: &str) -> PackConfig {
         ByteRegex::new("<a class=\"src\" href=\"[^\"]*/_[^\"]*\">source</a>").unwrap();
 
     // Rewrite srclinks from `../../crate_name/foo" to "/__DOCSERVER_SRCLINK/foo".
-    let re_rewrite_src = ByteRegex::new(&format!(
-        "<a class=\"src\" href=\"(\\.\\./)+src/{}",
-        &crate_name
-    ))
-    .unwrap();
+    let re_rewrite_src = ByteRegex::new(&format!("href=\"(\\.\\./)+src/{}", &crate_name)).unwrap();
 
     // Remove crates.js
     let re_remove_cratesjs =
@@ -66,7 +62,7 @@ fn pack_config(crate_name: &str) -> PackConfig {
                     )
                     .into_owned();
                 let res = re_rewrite_src
-                    .replace_all(&res, &b"<a class=\"src\" href=\"/__DOCSERVER_SRCLINK"[..])
+                    .replace_all(&res, &b"href=\"/__DOCSERVER_SRCLINK"[..])
                     .into_owned();
                 let res = re_rewrite_root.replace_all(&res, &[][..]).into_owned();
                 let res = re_fix_root_path
