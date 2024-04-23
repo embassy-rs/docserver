@@ -253,7 +253,7 @@ impl Thing {
                 let mut data = match zup.read(&zup_path) {
                     Err(e) if e.kind() == ErrorKind::NotFound => {
                         // check if it's due to incorrect flavor.
-                        if zup.open(&["flavors", path[3]]).is_ok() {
+                        if path.len() > 3 && zup.open(&["flavors", path[3]]).is_ok() {
                             // if flavor exists, path is wrong, so do 404.
                             return self.resp_404();
                         } else {
