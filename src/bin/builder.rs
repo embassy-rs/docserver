@@ -20,23 +20,23 @@ fn pack_config(crate_name: &str) -> PackConfig {
     let crate_name = crate_name.replace('-', "_");
 
     // Remove settings button (it breaks due to the path rewriting, we'll provide our own version)
-    let re_remove_settings = ByteRegex::new("<a id=\"settings-menu\".*?</a>").unwrap();
+    let re_remove_settings = ByteRegex::new(r##"<a id="settings-menu".*?</a>"##).unwrap();
 
     // Remove srclinks that point to a file starting with `_`.
     let re_remove_hidden_src =
         ByteRegex::new(r##"<a class="src" href="[^"]*/_[^"]*">source</a>"##).unwrap();
 
     // Rewrite srclinks from `../../crate_name/foo" to "/__DOCSERVER_SRCLINK/foo".
-    let re_rewrite_src = ByteRegex::new(&format!("href=\"(\\.\\./)+src/{}", &crate_name)).unwrap();
+    let re_rewrite_src = ByteRegex::new(&format!(r##"href="(\.\./)+src/{}"##, &crate_name)).unwrap();
 
     // Remove crates.js
     let re_remove_cratesjs =
-        ByteRegex::new("<script src=\"(\\.\\./)+crates.js\"></script>").unwrap();
+        ByteRegex::new(r##"<script\s*(?:defer="")?\s*src="(\.\./)+crates.js"></script>"##).unwrap();
 
     // Rewrite links from `../crate_name" to "".
-    let re_rewrite_root = ByteRegex::new(&format!("\\.\\./{}/", &crate_name)).unwrap();
+    let re_rewrite_root = ByteRegex::new(&format!(r##"\.\./{}/"##, &crate_name)).unwrap();
 
-    let re_fix_root_path = ByteRegex::new("data-root-path=\"\\.\\./").unwrap();
+    let re_fix_root_path = ByteRegex::new(r##"data-root-path="\.\./"##).unwrap();
 
     PackConfig {
         file_filter: Box::new(|path| {
@@ -55,7 +55,7 @@ fn pack_config(crate_name: &str) -> PackConfig {
                     .replace_all(
                         &res,
                         format!(
-                            "<script type=\"text/javascript\">window.ALL_CRATES=[\"{}\"];</script>",
+                            r##"<script type="text/javascript">window.ALL_CRATES=["{}"];</script>"##,
                             crate_name
                         )
                         .as_bytes(),
