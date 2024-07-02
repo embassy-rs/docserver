@@ -27,11 +27,13 @@ fn pack_config(crate_name: &str) -> PackConfig {
         ByteRegex::new(r##"<a class="src" href="[^"]*/_[^"]*">source</a>"##).unwrap();
 
     // Rewrite srclinks from `../../crate_name/foo" to "/__DOCSERVER_SRCLINK/foo".
-    let re_rewrite_src = ByteRegex::new(&format!(r##"href="(\.\./)+src/{}"##, &crate_name)).unwrap();
+    let re_rewrite_src =
+        ByteRegex::new(&format!(r##"href="(\.\./)+src/{}"##, &crate_name)).unwrap();
 
     // Remove crates.js
     let re_remove_cratesjs =
-        ByteRegex::new(r##"<script\s*(?:defer="")?\s*src="(\.\./)+crates.js"></script>"##).unwrap();
+        ByteRegex::new(r##"<script\s*(?:defer(="")?)?\s*src="(\.\./)+crates.js"></script>"##)
+            .unwrap();
 
     // Rewrite links from `../crate_name" to "".
     let re_rewrite_root = ByteRegex::new(&format!(r##"\.\./{}/"##, &crate_name)).unwrap();
