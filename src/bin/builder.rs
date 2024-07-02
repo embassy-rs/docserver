@@ -288,6 +288,12 @@ fn main() -> io::Result<()> {
 
                     let doc_crate_dir = doc_dir.join(crate_name.replace('-', "_"));
 
+                    fs::rename(
+                        doc_dir.join("search.desc"),
+                        doc_crate_dir.join("search.desc"),
+                    )
+                    .unwrap();
+
                     let bytes = fs::read(doc_dir.join("search-index.js")).unwrap();
                     fs::write(doc_crate_dir.join("search-index.js"), &bytes).unwrap();
 
