@@ -1,5 +1,6 @@
 #![feature(io_error_more)]
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
@@ -105,6 +106,7 @@ fn calc_flavors(manifest: &manifest::Manifest) -> Vec<Flavor> {
         })
     }
 
+    let mut processed = HashSet::new();
     for rule in &docs.flavors {
         let mut name_feats: Vec<(String, Vec<String>)> = Vec::new();
         match (&rule.name, &rule.regex_feature) {
@@ -112,7 +114,10 @@ fn calc_flavors(manifest: &manifest::Manifest) -> Vec<Flavor> {
             (None, Some(re)) => {
                 let re = Regex::new(&format!("^{}$", re)).unwrap();
                 for feature in manifest.features.keys().filter(|s| re.is_match(s)) {
-                    name_feats.push((feature.clone(), vec![feature.clone()]))
+                    if !processed.contains(feature) {
+                        name_feats.push((feature.clone(), vec![feature.clone()]));
+                        processed.insert(feature.clone());
+                    }
                 }
             }
             _ => panic!(
