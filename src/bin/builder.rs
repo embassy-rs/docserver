@@ -1,5 +1,3 @@
-#![feature(io_error_more)]
-
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
