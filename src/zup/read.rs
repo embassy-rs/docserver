@@ -3,7 +3,6 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::fs;
 use std::io::{self, Read};
-use std::ops::Deref;
 use std::path::Path;
 use std::str;
 use zstd::dict::DecoderDictionary;
@@ -44,7 +43,7 @@ impl Reader {
         &m[start..end]
     }
 
-    fn read_node(&self, node: layout::Node) -> io::Result<Cow<[u8]>> {
+    fn read_node(&self, node: layout::Node) -> io::Result<Cow<'_, [u8]>> {
         let data = Self::read_range(&self.m, node.range);
         if node.flags & layout::FLAG_COMPRESSED != 0 {
             let Some(dict) = &self.dict else {
@@ -54,7 +53,7 @@ impl Reader {
                 ));
             };
             let mut res = Vec::new();
-            let mut dec = Decoder::with_prepared_dictionary(data.deref(), dict)?;
+            let mut dec = Decoder::with_prepared_dictionary(data, dict)?;
             dec.read_to_end(&mut res)?;
             Ok(Cow::Owned(res))
         } else {
@@ -97,7 +96,7 @@ impl Reader {
         Ok(node)
     }
 
-    pub fn read(&self, path: &[&str]) -> io::Result<Cow<[u8]>> {
+    pub fn read(&self, path: &[&str]) -> io::Result<Cow<'_, [u8]>> {
         match self.open(path)? {
             Node::Directory(_) => {
                 return Err(io::Error::new(

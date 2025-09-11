@@ -1,8 +1,10 @@
-#![feature(io_error_more)]
-
+use http_body_util::Full;
+use hyper::body::Incoming;
 use hyper::header::HeaderValue;
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use log::info;
 use regex::bytes::{Captures, Regex as ByteRegex};
 use std::collections::HashMap;
@@ -11,9 +13,12 @@ use std::io::{self, ErrorKind};
 use std::path::PathBuf;
 use std::{env, fs};
 use tera::{Context, Tera};
+use tokio::net::TcpListener;
 
 use docserver::manifest;
 use docserver::zup::read::{Node, Reader};
+
+type Body = Full<hyper::body::Bytes>;
 
 fn extension(path: &str) -> &str {
     match path.rfind('.') {
@@ -149,7 +154,7 @@ impl Thing {
         Ok(resp)
     }
 
-    fn cookies(&self, req: &Request<Body>) -> HashMap<String, String> {
+    fn cookies(&self, req: &Request<Incoming>) -> HashMap<String, String> {
         // Parse cookies
         let mut cookies = HashMap::new();
         if let Some(h) = req.headers().get("Cookie") {
@@ -164,7 +169,7 @@ impl Thing {
 
     async fn guess_redirect(
         &self,
-        req: &Request<Body>,
+        req: &Request<Incoming>,
         mut krate: Option<&str>,
         mut version: Option<&str>,
     ) -> anyhow::Result<Response<Body>> {
@@ -205,7 +210,7 @@ impl Thing {
         self.resp_redirect(&format!("/{}/{}/{}/index.html", krate, version, flavor))
     }
 
-    async fn serve_inner(&self, req: Request<Body>) -> anyhow::Result<Response<Body>> {
+    async fn serve_inner(&self, req: Request<Incoming>) -> anyhow::Result<Response<Body>> {
         if req.method() != Method::GET {
             return self.resp_405();
         }
@@ -400,7 +405,7 @@ impl Thing {
         }
     }
 
-    pub async fn serve(&self, req: Request<Body>) -> Response<Body> {
+    pub async fn serve(&self, req: Request<Incoming>) -> Response<Body> {
         let method = req.method().clone();
         let uri = req.uri().clone();
 
@@ -411,13 +416,6 @@ impl Thing {
         info!("{} {}: {}", method, uri, resp.status());
         resp
     }
-}
-
-async fn shutdown_signal() {
-    // Wait for the CTRL+C signal
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install CTRL+C signal handler");
 }
 
 #[tokio::main]
@@ -433,18 +431,27 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let thing = Thing { path, templates };
     let thing: &'static Thing = Box::leak(Box::new(thing));
 
-    let addr = ([0, 0, 0, 0], 3000).into();
-    let server = Server::bind(&addr).serve(make_service_fn(move |_conn| async move {
-        Ok::<_, Infallible>(service_fn(move |req| async move {
-            Result::<_, Infallible>::Ok(thing.serve(req).await)
-        }))
-    }));
-
-    let server = server.with_graceful_shutdown(shutdown_signal());
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
+    let listener = TcpListener::bind(addr).await?;
 
     println!("Listening on http://{}", addr);
 
-    server.await?;
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
 
-    Ok(())
+        tokio::task::spawn(async move {
+            if let Err(err) = http1::Builder::new()
+                .serve_connection(
+                    io,
+                    service_fn(move |req| async move {
+                        Result::<_, Infallible>::Ok(thing.serve(req).await)
+                    }),
+                )
+                .await
+            {
+                println!("Error serving connection: {:?}", err);
+            }
+        });
+    }
 }

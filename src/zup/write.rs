@@ -7,7 +7,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use zstd::block::Compressor;
 
 use super::layout;
 
@@ -255,7 +254,7 @@ impl Tree {
                     _ => None,
                 })
                 .collect();
-            files.shuffle(&mut rand::thread_rng());
+            files.shuffle(&mut rand::rng());
             let mut len = 0;
             let mut i = 0;
             while len < compress.dict_train_size && i < files.len() {
@@ -266,7 +265,6 @@ impl Tree {
 
             let dict = zstd::dict::from_samples(&files, compress.dict_size).unwrap();
             WriterCompress {
-                c: zstd::block::Compressor::with_dict(dict.clone()),
                 dict,
                 level: compress.level,
             }
@@ -299,7 +297,6 @@ struct Writer<'a> {
 }
 
 struct WriterCompress {
-    c: Compressor,
     dict: Vec<u8>,
     level: i32,
 }
@@ -340,10 +337,14 @@ impl<'a> Writer<'a> {
         let mut buf: Cow<[u8]> = Cow::Borrowed(buf.as_ref());
 
         if let Some(comp) = &mut self.comp {
-            if let Ok(cdata) = comp.c.compress(&buf, comp.level) {
-                if cdata.len() < buf.len() {
-                    buf = cdata.into();
-                    flags = layout::FLAG_COMPRESSED;
+            if let Ok(mut compressor) =
+                zstd::bulk::Compressor::with_dictionary(comp.level, &comp.dict)
+            {
+                if let Ok(cdata) = compressor.compress(&buf) {
+                    if cdata.len() < buf.len() {
+                        buf = cdata.into();
+                        flags = layout::FLAG_COMPRESSED;
+                    }
                 }
             }
         }
