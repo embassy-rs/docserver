@@ -8,8 +8,8 @@ use regex::bytes::Regex as ByteRegex;
 use regex::Regex;
 
 use crate::common::manifest;
+use crate::common::zup::write::{pack, CompressConfig};
 
-// Functions to filter and process files as they would have been in the pack_config
 fn should_include_file(path: &Path) -> bool {
     path.file_name().map_or(true, |f| {
         f != "implementors" && !f.to_str().unwrap().starts_with('_') && !path.ends_with("!.html")
@@ -132,13 +132,33 @@ pub struct BuildArgs {
     #[clap(short)]
     pub input: PathBuf,
 
-    /// Output directory
+    /// Output path (directory or .zup file)
     #[clap(short)]
     pub output: PathBuf,
 
     /// Output directory containing static files.
     #[clap(long)]
     pub output_static: Option<PathBuf>,
+
+    /// Temporary directory for intermediate files
+    #[clap(long, default_value = "./work")]
+    pub temp_dir: PathBuf,
+
+    /// Compress output with zstd (only for .zup archives)
+    #[clap(short, long)]
+    pub compress: bool,
+
+    /// Compression level (only for .zup archives)
+    #[clap(long, default_value = "7")]
+    pub compress_level: i32,
+
+    /// Compress dictionary size (only for .zup archives)
+    #[clap(long, default_value = "163840")]
+    pub dict_size: usize,
+
+    /// Compress dictionary training set max size (only for .zup archives)
+    #[clap(long, default_value = "100000000")]
+    pub dict_train_size: usize,
 }
 
 // Helper function to copy and process a directory recursively
@@ -175,14 +195,45 @@ fn copy_and_process_dir(src_dir: &Path, dest_dir: &Path, crate_name: &str) -> an
 }
 
 pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
-    // Check if output directory exists, create it if it doesn't
-    if args.output.exists() {
-        return Err(anyhow::anyhow!(
-            "Output directory '{}' already exists. Please remove it or choose a different output path.",
-            args.output.display()
-        ));
+    // Determine if we're building to a .zup archive or a directory
+    let is_zup_output = args
+        .output
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s == "zup")
+        .unwrap_or(false);
+
+    // Set up temp directory structure
+    let cargo_target_dir = args.temp_dir.join("target");
+    let cargo_out_dir = args.temp_dir.join("out");
+    let build_tree_dir = args.temp_dir.join("tree");
+
+    // Clean the temp directories (but not the target dir)
+    if cargo_out_dir.exists() {
+        fs::remove_dir_all(&cargo_out_dir)?;
     }
-    fs::create_dir_all(&args.output)?;
+    fs::create_dir_all(&cargo_out_dir)?;
+
+    if is_zup_output && build_tree_dir.exists() {
+        fs::remove_dir_all(&build_tree_dir)?;
+    }
+
+    // Determine the actual build output directory
+    let build_output_dir = if is_zup_output {
+        // For .zup output, build to the tree temp directory
+        fs::create_dir_all(&build_tree_dir)?;
+        build_tree_dir
+    } else {
+        // Check if output directory exists, create it if it doesn't
+        if args.output.exists() {
+            return Err(anyhow::anyhow!(
+                "Output directory '{}' already exists. Please remove it or choose a different output path.",
+                args.output.display()
+            ));
+        }
+        fs::create_dir_all(&args.output)?;
+        args.output.clone()
+    };
 
     let manifest_bytes = load_manifest_bytes(&args.input);
     let manifest = load_manifest(&args.input);
@@ -204,9 +255,10 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.arg("batch")
         .arg("--target-dir")
-        .arg("work/target")
+        .arg(&cargo_target_dir)
         .arg("-Zunstable-options")
-        .arg("-Zrustdoc-map");
+        .arg("-Zrustdoc-map")
+        .env("CARGO_TARGET_DIR", &cargo_target_dir);
 
     for (i, flavor) in flavors.iter().enumerate() {
         cmd.arg("---")
@@ -214,7 +266,7 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
             .arg("--manifest-path")
             .arg(args.input.join("Cargo.toml").to_str().unwrap())
             .arg("--artifact-dir")
-            .arg(format!("work/out/{i}"))
+            .arg(cargo_out_dir.join(i.to_string()))
             .arg("--features")
             .arg(&flavor.features.join(","))
             .arg("--target")
@@ -247,7 +299,7 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
     }
 
     // Create flavors directory in output
-    let flavors_dir = args.output.join("flavors");
+    let flavors_dir = build_output_dir.join("flavors");
     fs::create_dir_all(&flavors_dir)?;
 
     let crate_name = &manifest.package.name;
@@ -256,7 +308,7 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
     // Process all flavors serially
     for (i, flavor) in flavors.iter().enumerate() {
         println!("processing {:?} ...", flavor);
-        let doc_dir = PathBuf::from(format!("work/out/{i}"));
+        let doc_dir = cargo_out_dir.join(i.to_string());
         let doc_crate_dir = doc_dir.join(crate_name.replace('-', "_"));
 
         // Move search files to the crate directory if they exist
@@ -303,10 +355,30 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
     }
 
     // Write the manifest and info files to the output directory
-    fs::write(args.output.join("Cargo.toml"), manifest_bytes)?;
-    fs::write(args.output.join("info.json"), docserver_info_bytes)?;
+    fs::write(build_output_dir.join("Cargo.toml"), manifest_bytes)?;
+    fs::write(build_output_dir.join("info.json"), docserver_info_bytes)?;
 
-    println!("Output written to: {:?}", args.output);
+    if is_zup_output {
+        // Create the final .zup archive
+        println!("Creating .zup archive: {:?}", args.output);
+
+        // Create output directory for .zup file if it doesn't exist
+        if let Some(parent) = args.output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let compress = args.compress.then(|| CompressConfig {
+            level: args.compress_level,
+            dict_size: args.dict_size,
+            dict_train_size: args.dict_train_size,
+        });
+
+        pack(&build_output_dir, &args.output, compress)?;
+
+        println!("Archive created: {:?}", args.output);
+    } else {
+        println!("Output written to: {:?}", build_output_dir);
+    }
 
     Ok(())
 }
