@@ -1,13 +1,10 @@
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::{fs, io};
 
 use clap::Parser;
-use crossbeam::channel::unbounded;
-use crossbeam::thread;
 use regex::bytes::Regex as ByteRegex;
 use regex::Regex;
 
@@ -183,10 +180,6 @@ struct Cli {
     /// Compress dictionary training set max size
     #[clap(long, default_value = "100000000", env = "BUILDER_DICT_TRAIN_SIZE")]
     dict_train_size: usize,
-
-    /// Compress dictionary training set max size
-    #[clap(short = 'j', env = "BUILDER_THREADS")]
-    num_threads: Option<usize>,
 }
 
 fn main() -> io::Result<()> {
@@ -194,11 +187,6 @@ fn main() -> io::Result<()> {
 
     let mut zup_tree = zup::write::Tree::new(PathBuf::from("zup_tree_work"));
     let mut zup_flavors = Vec::new();
-
-    let num_threads = cli.num_threads.unwrap_or(1);
-    println!("using {} threads", num_threads);
-
-    let m = Mutex::new((&mut zup_tree, &mut zup_flavors));
 
     let manifest_bytes = load_manifest_bytes(&cli.input);
     let manifest = load_manifest(&cli.input);
@@ -213,135 +201,113 @@ fn main() -> io::Result<()> {
     };
     let docserver_info_bytes = serde_json::to_vec(&docserver_info).unwrap();
 
-    let (tx, rx) = unbounded();
-    for flavor in calc_flavors(&manifest) {
-        tx.send(flavor).unwrap();
+    // Collect all flavors first to build the cargo batch command
+    let flavors: Vec<_> = calc_flavors(&manifest);
+
+    // Build the cargo batch command
+    let mut cmd = Command::new("cargo");
+    cmd.arg("batch")
+        .arg("--target-dir")
+        .arg("work/target")
+        .arg("-Zunstable-options")
+        .arg("-Zrustdoc-map");
+
+    for (i, flavor) in flavors.iter().enumerate() {
+        cmd.arg("---")
+            .arg("rustdoc")
+            .arg("--manifest-path")
+            .arg(cli.input.join("Cargo.toml").to_str().unwrap())
+            .arg("--artifact-dir")
+            .arg(format!("work/out/{i}"))
+            .arg("--features")
+            .arg(&flavor.features.join(","))
+            .arg("--target")
+            .arg(&flavor.target)
+            .arg("--")
+            .arg("-Zunstable-options")
+            .arg("--static-root-path")
+            .arg("/static/");
+
+        for (dep_name, dep) in &manifest.dependencies {
+            if let Some(_) = &dep.path {
+                cmd.arg(format!(
+                    "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
+                    dep_name.replace('-', "_"),
+                    dep_name,
+                ));
+            }
+        }
     }
-    drop(tx);
 
-    let statics_copied: &Mutex<bool> = &Mutex::new(false);
-    let static_path = &cli.output_static;
+    //cmd.current_dir(&cli.input);
+    println!("Running cargo batch with {} flavors...", flavors.len());
+    //println!("command: {cmd:?}");
+    let status = cmd.status().expect("failed to execute process");
 
-    thread::scope(|s| {
-        // Spawn workers
-        for i in 0..num_threads {
-            let j = i;
-            let rx = &rx;
-            let crate_path = &cli.input;
-            let manifest = &manifest;
-            let m = &m;
-            s.spawn(move |_| {
-                let crate_name = &manifest.package.name;
-                let pack_config = pack_config(crate_name);
-                let target_dir = format!("target_doc/work{}", j);
+    if !status.success() {
+        println!("===============");
+        println!("failed to execute cmd : {:?}", cmd);
+        println!("exit code : {:?}", status);
+        println!("===============");
+        process::exit(1);
+    }
 
-                let file_filter = pack_config.file_filter;
-                let data_filter = Arc::from(pack_config.data_filter);
+    // Process all flavors serially
+    let crate_name = &manifest.package.name;
+    let pack_config = pack_config(crate_name);
+    let file_filter = pack_config.file_filter;
+    let data_filter = Arc::from(pack_config.data_filter);
+    let mut statics_copied = false;
 
-                while let Ok(flavor) = rx.recv() {
-                    println!("documenting {:?} ...", flavor);
-                    let doc_dir = PathBuf::from(&target_dir).join(&flavor.target).join("doc");
-                    let _ = fs::remove_dir_all(&doc_dir);
+    for (i, flavor) in flavors.iter().enumerate() {
+        println!("processing {:?} ...", flavor);
+        let doc_dir = PathBuf::from(format!("work/out/{i}"));
+        let doc_crate_dir = doc_dir.join(crate_name.replace('-', "_"));
 
-                    let mut cmd = Command::new("cargo");
-                    cmd.args([
-                        "rustdoc",
-                        "--target-dir",
-                        &target_dir,
-                        "--manifest-path",
-                        crate_path.join("Cargo.toml").to_str().unwrap(),
-                        "--features",
-                        &flavor.features.join(","),
-                        "--target",
-                        &flavor.target,
-                        "-Zunstable-options",
-                        "-Zrustdoc-map",
-                        "--",
-                        "-Zunstable-options",
-                        "--static-root-path",
-                        "/static/",
-                    ]);
+        // Move search files to the crate directory if they exist
+        let search_desc = doc_dir.join("search.desc");
+        if search_desc.exists() {
+            fs::rename(&search_desc, doc_crate_dir.join("search.desc")).unwrap();
+        }
 
-                    for (dep_name, dep) in &manifest.dependencies {
-                        if let Some(_) = &dep.path {
-                            cmd.arg(format!(
-                                "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
-                                dep_name.replace('-', "_"),
-                                dep_name,
-                            ));
+        let search_index = doc_dir.join("search-index.js");
+        if search_index.exists() {
+            let bytes = fs::read(&search_index).unwrap();
+            fs::write(doc_crate_dir.join("search-index.js"), &bytes).unwrap();
+        }
+
+        let dir = zup_tree
+            .pack(&doc_crate_dir, &file_filter, &data_filter)
+            .unwrap()
+            .unwrap();
+        zup_flavors.push(DirectoryEntry {
+            name: flavor.name.clone(),
+            node_id: dir,
+        });
+
+        // Copy static files only once
+        if let Some(static_path) = &cli.output_static {
+            if !statics_copied {
+                fs::create_dir_all(static_path).unwrap();
+                // recursive copy
+                let doc_static_dir = doc_dir.join("static.files");
+                let mut stack = vec![doc_static_dir.clone()];
+                while let Some(path) = stack.pop() {
+                    if path.is_dir() {
+                        for entry in fs::read_dir(path).unwrap() {
+                            stack.push(entry.unwrap().path());
                         }
-                    }
-
-                    let output = cmd.output().expect("failed to execute process");
-
-                    let (zup_tree, zup_flavors) = &mut *m.lock().unwrap();
-
-                    if !output.status.success() {
-                        println!("===============");
-                        println!("failed to execute cmd : {:?}", cmd);
-                        println!("exit code : {:?}", cmd.status());
-                        println!("=============== STDOUT");
-                        io::stdout().write_all(&output.stdout).unwrap();
-                        println!("=============== STDERR");
-                        io::stdout().write_all(&output.stderr).unwrap();
-                        println!("===============");
-
-                        process::exit(1);
-                    }
-
-                    let doc_crate_dir = doc_dir.join(crate_name.replace('-', "_"));
-
-                    fs::rename(
-                        doc_dir.join("search.desc"),
-                        doc_crate_dir.join("search.desc"),
-                    )
-                    .unwrap();
-
-                    let bytes = fs::read(doc_dir.join("search-index.js")).unwrap();
-                    fs::write(doc_crate_dir.join("search-index.js"), &bytes).unwrap();
-
-                    let dir = zup_tree
-                        .pack(&doc_crate_dir, &file_filter, &data_filter)
-                        .unwrap()
-                        .unwrap();
-                    zup_flavors.push(DirectoryEntry {
-                        name: flavor.name.clone(),
-                        node_id: dir,
-                    });
-
-                    //fs::remove_dir_all(doc_crate_dir).unwrap();
-                    //fs::remove_dir_all(doc_dir.join("src")).unwrap();
-                    //fs::remove_dir_all(doc_dir.join("implementors")).unwrap();
-                    //fs::remove_file(doc_dir.join("crates.js")).unwrap();
-                    //fs::remove_file(doc_dir.join("source-files.js")).unwrap();
-
-                    if let Some(static_path) = static_path {
-                        let copy_done =
-                            std::mem::replace(&mut *statics_copied.lock().unwrap(), true);
-                        if !copy_done {
-                            fs::create_dir_all(static_path).unwrap();
-                            // recursive copy
-                            let doc_static_dir = doc_dir.join("static.files");
-                            let mut stack = vec![doc_static_dir.clone()];
-                            while let Some(path) = stack.pop() {
-                                if path.is_dir() {
-                                    for entry in fs::read_dir(path).unwrap() {
-                                        stack.push(entry.unwrap().path());
-                                    }
-                                } else {
-                                    let rel_path = path.strip_prefix(&doc_static_dir).unwrap();
-                                    let target_path = static_path.join(rel_path);
-                                    let _ = fs::create_dir_all(target_path.parent().unwrap());
-                                    fs::copy(path, target_path).unwrap();
-                                }
-                            }
-                        }
+                    } else {
+                        let rel_path = path.strip_prefix(&doc_static_dir).unwrap();
+                        let target_path = static_path.join(rel_path);
+                        let _ = fs::create_dir_all(target_path.parent().unwrap());
+                        fs::copy(path, target_path).unwrap();
                     }
                 }
-            });
+                statics_copied = true;
+            }
         }
-    })
-    .unwrap();
+    }
 
     if let Some(p) = cli.output.parent() {
         let _ = fs::create_dir_all(p);

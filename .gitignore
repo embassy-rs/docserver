@@ -2,3 +2,5 @@
 /target_doc
 /webroot
 *.zup
+/work
+/zup_tree_wor
