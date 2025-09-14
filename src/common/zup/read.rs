@@ -1,8 +1,8 @@
-use memmap2::Mmap;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::fs;
 use std::io::{self, Read};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::str;
 use zstd::dict::DecoderDictionary;
@@ -11,7 +11,7 @@ use zstd::Decoder;
 use super::layout;
 
 pub struct Reader {
-    m: Mmap,
+    file: fs::File,
     superblock: layout::Superblock,
     dict: Option<DecoderDictionary<'static>>,
 }
@@ -19,32 +19,39 @@ pub struct Reader {
 impl Reader {
     pub fn new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = fs::File::open(path)?;
-        let m = unsafe { Mmap::map(&file).expect("failed to map the file") };
+        let file_size = file.metadata()?.len();
 
-        let superblock = layout::Superblock::from_bytes(
-            m[m.len() - layout::Superblock::LEN..].try_into().unwrap(),
-        );
+        // Read the superblock from the end of the file
+        let mut superblock_buf = vec![0u8; layout::Superblock::LEN];
+        file.read_exact_at(
+            &mut superblock_buf,
+            file_size - layout::Superblock::LEN as u64,
+        )?;
 
-        let dict = superblock.dict.map(|dict| {
-            let dict = Self::read_range(&m, dict);
-            DecoderDictionary::copy(dict)
-        });
+        let superblock = layout::Superblock::from_bytes(superblock_buf.try_into().unwrap());
+
+        let dict = if let Some(dict_range) = superblock.dict {
+            let dict_data = Self::read_range(&file, dict_range)?;
+            Some(DecoderDictionary::copy(&dict_data))
+        } else {
+            None
+        };
 
         Ok(Self {
-            m,
+            file,
             superblock,
             dict,
         })
     }
 
-    fn read_range(m: &Mmap, r: layout::Range) -> &[u8] {
-        let start = r.offset as usize;
-        let end = r.offset as usize + r.len as usize;
-        &m[start..end]
+    fn read_range(file: &fs::File, r: layout::Range) -> io::Result<Vec<u8>> {
+        let mut buffer = vec![0u8; r.len as usize];
+        file.read_exact_at(&mut buffer, r.offset)?;
+        Ok(buffer)
     }
 
     fn read_node(&self, node: layout::Node) -> io::Result<Cow<'_, [u8]>> {
-        let data = Self::read_range(&self.m, node.range);
+        let data = Self::read_range(&self.file, node.range)?;
         if node.flags & layout::FLAG_COMPRESSED != 0 {
             let Some(dict) = &self.dict else {
                 return Err(io::Error::new(
@@ -53,11 +60,11 @@ impl Reader {
                 ));
             };
             let mut res = Vec::new();
-            let mut dec = Decoder::with_prepared_dictionary(data, dict)?;
+            let mut dec = Decoder::with_prepared_dictionary(&data[..], dict)?;
             dec.read_to_end(&mut res)?;
             Ok(Cow::Owned(res))
         } else {
-            Ok(Cow::Borrowed(data))
+            Ok(Cow::Owned(data))
         }
     }
 
