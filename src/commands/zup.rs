@@ -2,11 +2,12 @@ use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::common::zup::write::*;
+use crate::common::zup::write::{pack, CompressConfig};
 
 #[derive(Parser)]
 pub struct ZupArgs {
     /// Input directory to compress
+    #[clap(short, long)]
     pub input: PathBuf,
     /// Output .zup file
     #[clap(short, long)]
@@ -26,28 +27,12 @@ pub struct ZupArgs {
 }
 
 pub async fn run(args: ZupArgs) -> anyhow::Result<()> {
-    let mut zup_tree = Tree::new(PathBuf::from("zup_tree_work"));
-
-    // Simple file filter that includes all files
-    let file_filter: Box<dyn Fn(&std::path::Path) -> bool> = Box::new(|_path| true);
-
-    // Simple data filter that doesn't modify data
-    let data_filter: std::sync::Arc<dyn Fn(&std::path::Path, &mut Vec<u8>) + Send + Sync> =
-        std::sync::Arc::new(|_path, _data| {});
-
     println!("Compressing directory: {:?}", args.input);
 
-    // Pack the input directory
-    let root_id = zup_tree
-        .pack(&args.input, &file_filter, &data_filter)?
-        .ok_or_else(|| anyhow::anyhow!("Failed to pack directory"))?;
-
+    // Create output directory if it doesn't exist
     if let Some(p) = args.output.parent() {
-        let _ = fs::create_dir_all(p);
+        fs::create_dir_all(p)?;
     }
-
-    println!("total nodes: {}", zup_tree.node_count());
-    println!("total bytes: {}", zup_tree.total_bytes());
 
     let compress = args.compress.then(|| CompressConfig {
         level: args.compress_level,
@@ -55,7 +40,8 @@ pub async fn run(args: ZupArgs) -> anyhow::Result<()> {
         dict_train_size: args.dict_train_size,
     });
 
-    zup_tree.write(&args.output, root_id, compress)?;
+    // Pack the input directory using the new pack function
+    pack(&args.input, &args.output, compress)?;
 
     println!("Created archive: {:?}", args.output);
 

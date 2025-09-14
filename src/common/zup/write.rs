@@ -5,111 +5,13 @@ use std::collections::HashMap;
 use std::fs::{self};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::Mutex;
 
 use super::layout;
 
-#[derive(PartialEq, Eq, Clone, Copy, Hash, Debug)]
-pub struct NodeId(u64);
-
-pub enum Node {
-    Directory(Directory),
-    File(File),
-}
-
-pub struct Directory {
-    pub entries: Vec<DirectoryEntry>,
-}
-
-pub struct DirectoryEntry {
-    pub name: String,
-    pub node_id: NodeId,
-}
-
-enum PathOrData {
-    Path(
-        (
-            PathBuf,
-            Mutex<Arc<dyn Fn(&Path, &mut Vec<u8>) + Sync + Send>>,
-            usize,
-        ),
-    ),
-    Data(Arc<Vec<u8>>),
-}
-
-pub struct File {
-    contents: PathOrData,
-}
-
-impl File {
-    pub fn from_data(data: Vec<u8>) -> Self {
-        Self {
-            contents: PathOrData::Data(Arc::new(data)),
-        }
-    }
-
-    pub fn from_path(
-        path: PathBuf,
-        data_filter: Arc<dyn Fn(&Path, &mut Vec<u8>) + Sync + Send>,
-        len: usize,
-    ) -> Self {
-        Self {
-            contents: PathOrData::Path((path, Mutex::new(data_filter), len)),
-        }
-    }
-
-    fn len(&self) -> usize {
-        match &self.contents {
-            PathOrData::Path((_, _, len)) => *len,
-            PathOrData::Data(data) => data.len(),
-        }
-    }
-
-    fn data(&self) -> io::Result<FileData> {
-        match &self.contents {
-            PathOrData::Path((path, data_filter, _)) => {
-                let mut data = fs::read(&path)?;
-                {
-                    let data_filter = data_filter.lock().unwrap();
-                    (data_filter)(&path, &mut data);
-                }
-
-                Ok(FileData(Arc::new(data)))
-            }
-            PathOrData::Data(data) => Ok(FileData(data.clone())),
-        }
-    }
-}
-
-pub struct FileData(Arc<Vec<u8>>);
-
-impl AsRef<[u8]> for FileData {
-    fn as_ref(&self) -> &[u8] {
-        &*self.0
-    }
-}
-
-impl Node {
-    fn hash(&mut self) -> [u8; 32] {
-        let mut hash = Sha256::new();
-        match self {
-            Self::File(file) => hash.update(file.data().unwrap()),
-            Self::Directory(dir) => {
-                for entry in &dir.entries {
-                    hash.update(entry.name.len().to_le_bytes());
-                    hash.update(entry.name.as_bytes());
-                    hash.update(entry.node_id.0.to_le_bytes());
-                }
-            }
-        }
-        hash.finalize().into()
-    }
-}
-
-pub struct PackConfig {
-    pub data_filter: Box<dyn Fn(&Path, &mut Vec<u8>) + Send + Sync>,
-    pub file_filter: Box<dyn Fn(&Path) -> bool>,
+fn hash(data: &[u8]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(data);
+    hash.finalize().into()
 }
 
 pub struct CompressConfig {
@@ -118,182 +20,107 @@ pub struct CompressConfig {
     pub dict_train_size: usize,
 }
 
-pub struct Tree {
-    nodes: HashMap<NodeId, Node>,
-    hash_dedup: HashMap<[u8; 32], NodeId>,
-    next_id: u64,
-    work_dir: PathBuf,
-    next_dir: u64,
+#[derive(Default)]
+struct Stats {
+    total_files: u64,
+    total_dirs: u64,
+    nodes_before_dedup: u64,
+    nodes_after_dedup: u64,
+    uncompressed_bytes_before_dedup: u64,
+    uncompressed_bytes_after_dedup: u64,
+    compressed_bytes_before_dedup: u64,
+    compressed_bytes_after_dedup: u64,
 }
 
-impl Tree {
-    pub fn new(work_dir: PathBuf) -> Self {
-        Self {
-            nodes: HashMap::new(),
-            hash_dedup: HashMap::new(),
-            next_id: 0,
-            work_dir: work_dir,
-            next_dir: 0,
-        }
-    }
+pub fn pack(
+    input_dir: &Path,
+    output_path: &Path,
+    compress: Option<CompressConfig>,
+) -> io::Result<()> {
+    let f = fs::File::create(output_path)?;
 
-    pub fn node_count(&self) -> usize {
-        self.nodes.len()
-    }
+    let comp = match compress {
+        Some(compress) => {
+            println!("Creating dictionary...");
 
-    pub fn total_bytes(&self) -> usize {
-        self.nodes
-            .iter()
-            .map(|(_, n)| match n {
-                Node::File(f) => f.len(),
-                _ => 0,
-            })
-            .sum()
-    }
-
-    pub fn gen_id(&mut self) -> NodeId {
-        self.next_id += 1;
-        NodeId(self.next_id)
-    }
-
-    pub fn pack(
-        &mut self,
-        path: &Path,
-        file_filter: &Box<dyn Fn(&Path) -> bool>,
-        data_filter: &Arc<dyn Fn(&Path, &mut Vec<u8>) + Send + Sync>,
-    ) -> io::Result<Option<NodeId>> {
-        let to = self
-            .work_dir
-            .join(self.next_dir.to_string())
-            .join(path.file_name().unwrap());
-
-        fs::create_dir_all(to.parent().unwrap())?;
-        fs::rename(path, &to)?;
-
-        self.next_dir += 1;
-        self.pack_inner(&to, file_filter, data_filter)
-    }
-
-    fn pack_inner(
-        &mut self,
-        path: &Path,
-        file_filter: &Box<dyn Fn(&Path) -> bool>,
-        data_filter: &Arc<dyn Fn(&Path, &mut Vec<u8>) + Send + Sync>,
-    ) -> io::Result<Option<NodeId>> {
-        let path = path.canonicalize()?;
-
-        let m = fs::metadata(&path)?;
-        let node = if m.is_dir() {
-            let mut readdir = Vec::new();
-            for entry in fs::read_dir(&path)? {
-                readdir.push(entry?);
+            // Recursively list all file paths under input_dir
+            let mut file_paths: Vec<PathBuf> = Vec::new();
+            let mut stack = vec![input_dir.to_path_buf()];
+            while let Some(current_path) = stack.pop() {
+                if let Ok(entries) = fs::read_dir(&current_path) {
+                    for entry in entries.flatten() {
+                        let entry_path = entry.path();
+                        if entry_path.is_dir() {
+                            stack.push(entry_path);
+                        } else if entry_path.is_file() {
+                            file_paths.push(entry_path);
+                        }
+                    }
+                }
             }
-            readdir.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
-            let mut entries = Vec::new();
+            // Shuffle them
+            file_paths.shuffle(&mut rand::rng());
 
-            for entry in readdir {
-                let child = entry.path();
+            // Start grabbing files, stop when we reach dict_train_size
+            let mut training_data = Vec::new();
+            let mut total_len = 0;
 
-                if !(file_filter)(&child) {
-                    continue;
+            for file_path in file_paths {
+                if total_len >= compress.dict_train_size {
+                    break;
                 }
 
-                let Some(node_id) = self.pack_inner(&child, &file_filter, &data_filter)? else {
-                    continue;
-                };
-                let name = entry.file_name().to_string_lossy().to_string();
-                entries.push(DirectoryEntry { name, node_id });
+                let file_data = fs::read(&file_path)?;
+                total_len += file_data.len();
+                training_data.push(file_data);
             }
-            if entries.is_empty() {
-                return Ok(None);
-            }
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
-            Node::Directory(Directory { entries })
-        } else if m.is_file() {
-            Node::File(File::from_path(
-                path.clone(),
-                data_filter.clone(),
-                m.len().try_into().unwrap(),
-            ))
-        } else {
-            panic!("unknown type {:?} {:?}", path, m);
-        };
 
-        Ok(Some(self.add_node(node)))
-    }
+            let training_files: Vec<_> = training_data.iter().map(|f| f.as_slice()).collect();
 
-    pub fn add_node(&mut self, mut node: Node) -> NodeId {
-        let hash = node.hash();
-        if let Some(id) = self.hash_dedup.get(&hash) {
-            return *id;
-        }
+            let dict = if training_files.is_empty()
+                || training_data.iter().map(|f| f.len()).sum::<usize>() < 100
+            {
+                // If we don't have enough training data, create an empty dictionary
+                Vec::new()
+            } else {
+                zstd::dict::from_samples(&training_files, compress.dict_size)
+                    .unwrap_or_else(|e| {
+                        println!("Warning: Failed to create compression dictionary: {}. Using no dictionary.", e);
+                        Vec::new()
+                    })
+            };
 
-        let id = self.gen_id();
-        self.nodes.insert(id, node);
-        self.hash_dedup.insert(hash, id);
-
-        id
-    }
-
-    pub fn write(
-        &mut self,
-        path: &Path,
-        root: NodeId,
-        compress: Option<CompressConfig>,
-    ) -> io::Result<()> {
-        let f = fs::File::create(path)?;
-
-        let comp = compress.map(|compress| {
-            println!("compressing...");
-            let mut files: Vec<_> = self
-                .nodes
-                .iter()
-                .filter_map(|(_, n)| match n {
-                    Node::File(f) => Some(f),
-                    _ => None,
-                })
-                .collect();
-            files.shuffle(&mut rand::rng());
-            let mut len = 0;
-            let mut i = 0;
-            while len < compress.dict_train_size && i < files.len() {
-                len += files[i].len();
-                i += 1;
-            }
-            let files: Vec<_> = files[..i].iter().map(|f| f.data().unwrap()).collect();
-
-            let dict = zstd::dict::from_samples(&files, compress.dict_size).unwrap();
-            WriterCompress {
+            Some(WriterCompress {
                 dict,
                 level: compress.level,
-            }
-        });
+            })
+        }
+        None => None,
+    };
 
-        // Write stuff
-        let mut w = Writer {
-            f,
-            comp,
-            nodes: HashMap::new(),
-            offset: 0,
-            tree: self,
-        };
+    // Write stuff
+    let mut w = Writer {
+        f,
+        comp,
+        offset: 0,
+        hash_dedup: HashMap::new(),
+        stats: Stats::default(),
+    };
 
-        let root = w.write(root)?;
-        w.finish(root)?;
+    let root = w.write(input_dir)?;
+    w.print_stats();
+    w.finish(root)?;
 
-        fs::remove_dir_all(&self.work_dir)?;
-
-        Ok(())
-    }
+    Ok(())
 }
 
-struct Writer<'a> {
-    tree: &'a Tree,
+struct Writer {
     f: fs::File,
-    nodes: HashMap<NodeId, layout::Node>,
+    hash_dedup: HashMap<[u8; 32], layout::Node>,
     offset: u64,
     comp: Option<WriterCompress>,
+    stats: Stats,
 }
 
 struct WriterCompress {
@@ -301,41 +128,54 @@ struct WriterCompress {
     level: i32,
 }
 
-impl<'a> Writer<'a> {
-    fn write(&mut self, node_id: NodeId) -> io::Result<layout::Node> {
-        if let Some(res) = self.nodes.get(&node_id) {
-            return Ok(*res);
+impl Writer {
+    fn write(&mut self, path: &Path) -> io::Result<layout::Node> {
+        let m = fs::metadata(&path)?;
+        if m.is_dir() {
+            self.stats.total_dirs += 1;
+
+            let mut readdir: Vec<_> = fs::read_dir(&path)?.try_collect()?;
+            readdir.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+            let mut buf = Vec::new();
+            for entry in readdir {
+                let node = self.write(&entry.path())?;
+
+                let name = entry.file_name().to_string_lossy().to_string();
+                buf.push(name.len().try_into().unwrap());
+                buf.extend_from_slice(name.as_bytes());
+                buf.extend_from_slice(&node.to_bytes());
+            }
+
+            let mut res = self.write_node(&buf)?;
+            res.flags |= layout::FLAG_DIR;
+            Ok(res)
+        } else {
+            self.stats.total_files += 1;
+
+            let buf = fs::read(path)?;
+            let mut res = self.write_node(&buf)?;
+            Ok(res)
         }
-
-        let res = match self.tree.nodes.get(&node_id).unwrap() {
-            Node::Directory(dir) => {
-                let mut buf = Vec::new();
-                for entry in &dir.entries {
-                    let node = self.write(entry.node_id)?;
-
-                    buf.push(entry.name.len().try_into().unwrap());
-                    buf.extend_from_slice(entry.name.as_bytes());
-                    buf.extend_from_slice(&node.to_bytes());
-                }
-                let mut res = self.write_node(&buf)?;
-                res.flags |= layout::FLAG_DIR;
-                res
-            }
-            Node::File(file) => {
-                let result = self.write_node(file.data().unwrap())?;
-
-                result
-            }
-        };
-
-        self.nodes.insert(node_id, res);
-        Ok(res)
     }
 
     fn write_node(&mut self, buf: impl AsRef<[u8]>) -> io::Result<layout::Node> {
-        let mut flags = 0;
         let mut buf: Cow<[u8]> = Cow::Borrowed(buf.as_ref());
+        // Track stats before dedup
+        self.stats.nodes_before_dedup += 1;
+        self.stats.uncompressed_bytes_before_dedup += buf.len() as u64;
 
+        let hash = hash(&buf);
+        if let Some(res) = self.hash_dedup.get(&hash) {
+            self.stats.compressed_bytes_before_dedup += res.range.len;
+            return Ok(*res);
+        }
+
+        // This is a new unique node
+        self.stats.nodes_after_dedup += 1;
+        self.stats.uncompressed_bytes_after_dedup += buf.len() as u64;
+
+        let mut flags = 0;
         if let Some(comp) = &mut self.comp {
             if let Ok(mut compressor) =
                 zstd::bulk::Compressor::with_dictionary(comp.level, &comp.dict)
@@ -349,8 +189,13 @@ impl<'a> Writer<'a> {
             }
         }
 
+        self.stats.compressed_bytes_before_dedup += buf.len() as u64;
+        self.stats.compressed_bytes_after_dedup += buf.len() as u64;
+
         let range = self.write_data(&buf)?;
-        Ok(layout::Node { range, flags })
+        let node = layout::Node { range, flags };
+        self.hash_dedup.insert(hash, node);
+        Ok(node)
     }
 
     fn write_data(&mut self, buf: &[u8]) -> io::Result<layout::Range> {
@@ -361,6 +206,63 @@ impl<'a> Writer<'a> {
         };
         self.offset += res.len;
         Ok(res)
+    }
+
+    fn print_stats(&self) {
+        let compression_enabled = self.comp.is_some();
+
+        println!("Statistics:");
+        println!("  Files: {}", self.stats.total_files);
+        println!("  Directories: {}", self.stats.total_dirs);
+        println!(
+            "  Total entries: {}",
+            self.stats.total_files + self.stats.total_dirs
+        );
+        println!("  Nodes before dedup: {}", self.stats.nodes_before_dedup);
+        println!(
+            "        after dedup:  {} ({:.1}% reduction)",
+            self.stats.nodes_after_dedup,
+            100.0 * (self.stats.nodes_before_dedup - self.stats.nodes_after_dedup) as f64
+                / self.stats.nodes_before_dedup as f64
+        );
+        println!(
+            "  Uncompressed bytes before dedup: {} ({:.1} MB)",
+            self.stats.uncompressed_bytes_before_dedup,
+            self.stats.uncompressed_bytes_before_dedup as f64 / 1_000_000.0
+        );
+        println!(
+            "                     after dedup:  {} ({:.1} MB, {:.1}% reduction)",
+            self.stats.uncompressed_bytes_after_dedup,
+            self.stats.uncompressed_bytes_after_dedup as f64 / 1_000_000.0,
+            100.0
+                * (self.stats.uncompressed_bytes_before_dedup
+                    - self.stats.uncompressed_bytes_after_dedup) as f64
+                / self.stats.uncompressed_bytes_before_dedup as f64
+        );
+
+        if compression_enabled {
+            println!(
+                "  Compressed bytes   before dedup: {} ({:.1} MB)",
+                self.stats.compressed_bytes_before_dedup,
+                self.stats.compressed_bytes_before_dedup as f64 / 1_000_000.0
+            );
+            println!(
+                "                     after dedup:  {} ({:.1} MB, {:.1}% reduction)",
+                self.stats.compressed_bytes_after_dedup,
+                self.stats.compressed_bytes_after_dedup as f64 / 1_000_000.0,
+                100.0
+                    * (self.stats.compressed_bytes_before_dedup
+                        - self.stats.compressed_bytes_after_dedup) as f64
+                    / self.stats.compressed_bytes_before_dedup as f64
+            );
+            if self.stats.uncompressed_bytes_after_dedup > 0 {
+                println!(
+                    "  Overall compression ratio: {:.1}%",
+                    100.0 * self.stats.compressed_bytes_after_dedup as f64
+                        / self.stats.uncompressed_bytes_before_dedup as f64
+                );
+            }
+        }
     }
 
     fn finish(mut self, root: layout::Node) -> io::Result<()> {

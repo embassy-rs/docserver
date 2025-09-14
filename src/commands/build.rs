@@ -2,16 +2,21 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
-use std::sync::Arc;
 
 use clap::Parser;
 use regex::bytes::Regex as ByteRegex;
 use regex::Regex;
 
-use crate::common::zup::write::*;
-use crate::common::{manifest, zup};
+use crate::common::manifest;
 
-fn pack_config(crate_name: &str) -> PackConfig {
+// Functions to filter and process files as they would have been in the pack_config
+fn should_include_file(path: &Path) -> bool {
+    path.file_name().map_or(true, |f| {
+        f != "implementors" && !f.to_str().unwrap().starts_with('_') && !path.ends_with("!.html")
+    })
+}
+
+fn process_html_file(crate_name: &str, data: Vec<u8>) -> Vec<u8> {
     let crate_name = crate_name.replace('-', "_");
 
     // Remove settings button (it breaks due to the path rewriting, we'll provide our own version)
@@ -35,40 +40,26 @@ fn pack_config(crate_name: &str) -> PackConfig {
 
     let re_fix_root_path = ByteRegex::new(r##"data-root-path="\.\./"##).unwrap();
 
-    PackConfig {
-        file_filter: Box::new(|path| {
-            path.file_name().map_or(true, |f| {
-                f != "implementors"
-                    && !f.to_str().unwrap().starts_with('_')
-                    && !path.ends_with("!.html")
-            })
-        }),
-        data_filter: Box::new(move |path, data| {
-            if path.to_str().unwrap().ends_with(".html") {
-                let res = &data;
-                let res = re_remove_settings.replace_all(&res, &[][..]).into_owned();
-                let res = re_remove_hidden_src.replace_all(&res, &[][..]).into_owned();
-                let res = re_remove_cratesjs
-                    .replace_all(
-                        &res,
-                        format!(
-                            r##"<script type="text/javascript">window.ALL_CRATES=["{}"];</script>"##,
-                            crate_name
-                        )
-                        .as_bytes(),
-                    )
-                    .into_owned();
-                let res = re_rewrite_src
-                    .replace_all(&res, &b"href=\"/__DOCSERVER_SRCLINK"[..])
-                    .into_owned();
-                let res = re_rewrite_root.replace_all(&res, &[][..]).into_owned();
-                let res = re_fix_root_path
-                    .replace_all(&res, &b"data-root-path=\"./"[..])
-                    .into_owned();
-                *data = res;
-            }
-        }),
-    }
+    let res = re_remove_settings.replace_all(&data, &[][..]).into_owned();
+    let res = re_remove_hidden_src.replace_all(&res, &[][..]).into_owned();
+    let res = re_remove_cratesjs
+        .replace_all(
+            &res,
+            format!(
+                r##"<script type="text/javascript">window.ALL_CRATES=["{}"];</script>"##,
+                crate_name
+            )
+            .as_bytes(),
+        )
+        .into_owned();
+    let res = re_rewrite_src
+        .replace_all(&res, &b"href=\"/__DOCSERVER_SRCLINK"[..])
+        .into_owned();
+    let res = re_rewrite_root.replace_all(&res, &[][..]).into_owned();
+    let res = re_fix_root_path
+        .replace_all(&res, &b"data-root-path=\"./"[..])
+        .into_owned();
+    res
 }
 
 #[derive(Debug, Clone)]
@@ -141,33 +132,57 @@ pub struct BuildArgs {
     #[clap(short)]
     pub input: PathBuf,
 
-    /// Output .zup
+    /// Output directory
     #[clap(short)]
     pub output: PathBuf,
 
     /// Output directory containing static files.
     #[clap(long)]
     pub output_static: Option<PathBuf>,
+}
 
-    /// Compress output with zstd
-    #[clap(short, env = "BUILDER_COMPRESS")]
-    pub compress: bool,
+// Helper function to copy and process a directory recursively
+fn copy_and_process_dir(src_dir: &Path, dest_dir: &Path, crate_name: &str) -> anyhow::Result<()> {
+    for entry in fs::read_dir(src_dir)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let file_name = entry.file_name();
+        let dest_path = dest_dir.join(&file_name);
 
-    #[clap(long, default_value = "7", env = "BUILDER_COMPRESS_LEVEL")]
-    pub compress_level: i32,
+        if src_path.is_dir() {
+            // Skip directories that should be filtered
+            if should_include_file(&src_path) {
+                fs::create_dir_all(&dest_path)?;
+                copy_and_process_dir(&src_path, &dest_path, crate_name)?;
+            }
+        } else {
+            // Skip files that should be filtered
+            if should_include_file(&src_path) {
+                let data = fs::read(&src_path)?;
+                let processed_data =
+                    if src_path.extension().and_then(|s| s.to_str()) == Some("html") {
+                        process_html_file(crate_name, data)
+                    } else {
+                        data
+                    };
 
-    /// Compress dictionary size
-    #[clap(long, default_value = "163840", env = "BUILDER_DICT_SIZE")]
-    pub dict_size: usize,
+                fs::write(&dest_path, &processed_data)?;
+            }
+        }
+    }
 
-    /// Compress dictionary training set max size
-    #[clap(long, default_value = "100000000", env = "BUILDER_DICT_TRAIN_SIZE")]
-    pub dict_train_size: usize,
+    Ok(())
 }
 
 pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
-    let mut zup_tree = zup::write::Tree::new(PathBuf::from("zup_tree_work"));
-    let mut zup_flavors = Vec::new();
+    // Check if output directory exists, create it if it doesn't
+    if args.output.exists() {
+        return Err(anyhow::anyhow!(
+            "Output directory '{}' already exists. Please remove it or choose a different output path.",
+            args.output.display()
+        ));
+    }
+    fs::create_dir_all(&args.output)?;
 
     let manifest_bytes = load_manifest_bytes(&args.input);
     let manifest = load_manifest(&args.input);
@@ -220,9 +235,7 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         }
     }
 
-    //cmd.current_dir(&args.input);
     println!("Running cargo batch with {} flavors...", flavors.len());
-    //println!("command: {cmd:?}");
     let status = cmd.status().expect("failed to execute process");
 
     if !status.success() {
@@ -233,13 +246,14 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         process::exit(1);
     }
 
-    // Process all flavors serially
+    // Create flavors directory in output
+    let flavors_dir = args.output.join("flavors");
+    fs::create_dir_all(&flavors_dir)?;
+
     let crate_name = &manifest.package.name;
-    let pack_config = pack_config(crate_name);
-    let file_filter = pack_config.file_filter;
-    let data_filter = Arc::from(pack_config.data_filter);
     let mut statics_copied = false;
 
+    // Process all flavors serially
     for (i, flavor) in flavors.iter().enumerate() {
         println!("processing {:?} ...", flavor);
         let doc_dir = PathBuf::from(format!("work/out/{i}"));
@@ -257,14 +271,12 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
             fs::write(doc_crate_dir.join("search-index.js"), &bytes).unwrap();
         }
 
-        let dir = zup_tree
-            .pack(&doc_crate_dir, &file_filter, &data_filter)
-            .unwrap()
-            .unwrap();
-        zup_flavors.push(DirectoryEntry {
-            name: flavor.name.clone(),
-            node_id: dir,
-        });
+        // Create flavor directory in output
+        let flavor_output_dir = flavors_dir.join(&flavor.name);
+        fs::create_dir_all(&flavor_output_dir)?;
+
+        // Copy and process the documentation files
+        copy_and_process_dir(&doc_crate_dir, &flavor_output_dir, crate_name)?;
 
         // Copy static files only once
         if let Some(static_path) = &args.output_static {
@@ -290,41 +302,11 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         }
     }
 
-    if let Some(p) = args.output.parent() {
-        let _ = fs::create_dir_all(p);
-    }
+    // Write the manifest and info files to the output directory
+    fs::write(args.output.join("Cargo.toml"), manifest_bytes)?;
+    fs::write(args.output.join("info.json"), docserver_info_bytes)?;
 
-    println!("total nodes: {}", zup_tree.node_count());
-    println!("total bytes: {}", zup_tree.total_bytes());
-
-    let zup_flavors = zup_tree.add_node(Node::Directory(Directory {
-        entries: zup_flavors,
-    }));
-
-    let zup_root = Node::Directory(Directory {
-        entries: vec![
-            DirectoryEntry {
-                name: "flavors".to_string(),
-                node_id: zup_flavors,
-            },
-            DirectoryEntry {
-                name: "Cargo.toml".to_string(),
-                node_id: zup_tree.add_node(Node::File(File::from_data(manifest_bytes))),
-            },
-            DirectoryEntry {
-                name: "info.json".to_string(),
-                node_id: zup_tree.add_node(Node::File(File::from_data(docserver_info_bytes))),
-            },
-        ],
-    });
-
-    let zup_root = zup_tree.add_node(zup_root);
-    let compress = args.compress.then(|| CompressConfig {
-        level: args.compress_level,
-        dict_size: args.dict_size,
-        dict_train_size: args.dict_train_size,
-    });
-    zup_tree.write(&args.output, zup_root, compress)?;
+    println!("Output written to: {:?}", args.output);
 
     Ok(())
 }
