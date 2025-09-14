@@ -1,16 +1,15 @@
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::Arc;
-use std::{fs, io};
 
 use clap::Parser;
 use regex::bytes::Regex as ByteRegex;
 use regex::Regex;
 
-use docserver::manifest;
-use docserver::zup;
-use docserver::zup::write::*;
+use crate::common::zup::write::*;
+use crate::common::{manifest, zup};
 
 fn pack_config(crate_name: &str) -> PackConfig {
     let crate_name = crate_name.replace('-', "_");
@@ -72,7 +71,7 @@ fn pack_config(crate_name: &str) -> PackConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Flavor {
     name: String,
     features: Vec<String>,
@@ -109,7 +108,7 @@ fn calc_flavors(manifest: &manifest::Manifest) -> Vec<Flavor> {
             (None, Some(re)) => {
                 let re = Regex::new(&format!("^{}$", re)).unwrap();
                 for feature in manifest.features.keys().filter(|s| re.is_match(s)) {
-                    if !processed.contains(feature) {
+                    if !processed.contains::<String>(feature) {
                         name_feats.push((feature.clone(), vec![feature.clone()]));
                         processed.insert(feature.clone());
                     }
@@ -136,64 +135,46 @@ fn calc_flavors(manifest: &manifest::Manifest) -> Vec<Flavor> {
     flavors
 }
 
-fn match_flavor<'a>(local: &Flavor, dep: &'a [Flavor]) -> Option<&'a Flavor> {
-    // Match by name.
-    if let Some(f) = dep.iter().find(|f| f.name == local.name) {
-        return Some(f);
-    }
-
-    // Match by target.
-    if let Some(f) = dep.iter().find(|f| f.target == local.target) {
-        return Some(f);
-    }
-
-    // Just pick any, or none if there are no flavors.
-    dep.get(0)
-}
-
-#[derive(clap::Parser)]
-#[clap(version = "1.0", author = "Dario Nieuwenhuis <dirbaio@dirbaio.net>")]
-struct Cli {
+#[derive(Parser)]
+pub struct BuildArgs {
     /// Input crate directory (the directory containing the Cargo.toml)
     #[clap(short)]
-    input: PathBuf,
+    pub input: PathBuf,
 
     /// Output .zup
     #[clap(short)]
-    output: PathBuf,
+    pub output: PathBuf,
 
     /// Output directory containing static files.
     #[clap(long)]
-    output_static: Option<PathBuf>,
+    pub output_static: Option<PathBuf>,
 
     /// Compress output with zstd
     #[clap(short, env = "BUILDER_COMPRESS")]
-    compress: bool,
+    pub compress: bool,
 
     #[clap(long, default_value = "7", env = "BUILDER_COMPRESS_LEVEL")]
-    compress_level: i32,
+    pub compress_level: i32,
 
     /// Compress dictionary size
     #[clap(long, default_value = "163840", env = "BUILDER_DICT_SIZE")]
-    dict_size: usize,
+    pub dict_size: usize,
 
     /// Compress dictionary training set max size
     #[clap(long, default_value = "100000000", env = "BUILDER_DICT_TRAIN_SIZE")]
-    dict_train_size: usize,
+    pub dict_train_size: usize,
 }
 
-fn main() -> io::Result<()> {
-    let cli = Cli::parse();
-
+pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
     let mut zup_tree = zup::write::Tree::new(PathBuf::from("zup_tree_work"));
     let mut zup_flavors = Vec::new();
 
-    let manifest_bytes = load_manifest_bytes(&cli.input);
-    let manifest = load_manifest(&cli.input);
+    let manifest_bytes = load_manifest_bytes(&args.input);
+    let manifest = load_manifest(&args.input);
 
     let mut cmd = Command::new("git");
     cmd.args(&["rev-parse", "HEAD"]);
-    cmd.current_dir(&cli.input);
+    cmd.current_dir(&args.input);
     let output = cmd.output().unwrap();
     assert!(output.status.success());
     let docserver_info = manifest::DocserverInfo {
@@ -216,7 +197,7 @@ fn main() -> io::Result<()> {
         cmd.arg("---")
             .arg("rustdoc")
             .arg("--manifest-path")
-            .arg(cli.input.join("Cargo.toml").to_str().unwrap())
+            .arg(args.input.join("Cargo.toml").to_str().unwrap())
             .arg("--artifact-dir")
             .arg(format!("work/out/{i}"))
             .arg("--features")
@@ -239,7 +220,7 @@ fn main() -> io::Result<()> {
         }
     }
 
-    //cmd.current_dir(&cli.input);
+    //cmd.current_dir(&args.input);
     println!("Running cargo batch with {} flavors...", flavors.len());
     //println!("command: {cmd:?}");
     let status = cmd.status().expect("failed to execute process");
@@ -286,7 +267,7 @@ fn main() -> io::Result<()> {
         });
 
         // Copy static files only once
-        if let Some(static_path) = &cli.output_static {
+        if let Some(static_path) = &args.output_static {
             if !statics_copied {
                 fs::create_dir_all(static_path).unwrap();
                 // recursive copy
@@ -309,7 +290,7 @@ fn main() -> io::Result<()> {
         }
     }
 
-    if let Some(p) = cli.output.parent() {
+    if let Some(p) = args.output.parent() {
         let _ = fs::create_dir_all(p);
     }
 
@@ -338,12 +319,12 @@ fn main() -> io::Result<()> {
     });
 
     let zup_root = zup_tree.add_node(zup_root);
-    let compress = cli.compress.then(|| CompressConfig {
-        level: cli.compress_level,
-        dict_size: cli.dict_size,
-        dict_train_size: cli.dict_train_size,
+    let compress = args.compress.then(|| CompressConfig {
+        level: args.compress_level,
+        dict_size: args.dict_size,
+        dict_train_size: args.dict_train_size,
     });
-    zup_tree.write(&cli.output, zup_root, compress)?;
+    zup_tree.write(&args.output, zup_root, compress)?;
 
     Ok(())
 }

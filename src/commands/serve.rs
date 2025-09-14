@@ -1,3 +1,4 @@
+use clap::Parser;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::header::HeaderValue;
@@ -15,8 +16,8 @@ use std::{env, fs};
 use tera::{Context, Tera};
 use tokio::net::TcpListener;
 
-use docserver::manifest;
-use docserver::zup::read::{Node, Reader};
+use crate::common::manifest;
+use crate::common::zup::read::{Node, Reader};
 
 type Body = Full<hyper::body::Bytes>;
 
@@ -418,15 +419,21 @@ impl Thing {
     }
 }
 
-#[tokio::main]
-pub async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    pretty_env_logger::init();
+#[derive(Parser)]
+pub struct ServeArgs {
+    /// Path to the webroot containing crates and static files
+    #[clap(long, env = "DOCSERVER_PATH")]
+    pub path: Option<PathBuf>,
+}
 
+pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     let templates = Tera::new("templates/**/*.html").unwrap();
 
-    let path: PathBuf = env::var_os("DOCSERVER_PATH")
-        .expect("Missing DOCSERVER_PATH")
-        .into();
+    let path: PathBuf = args.path.unwrap_or_else(|| {
+        env::var_os("DOCSERVER_PATH")
+            .expect("Missing DOCSERVER_PATH environment variable or --path argument")
+            .into()
+    });
 
     let thing = Thing { path, templates };
     let thing: &'static Thing = Box::leak(Box::new(thing));

@@ -1,11 +1,12 @@
+use clap::Parser;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use zup::layout;
-use zup::read::Node;
 
-use docserver::zup;
-use docserver::zup::read::Reader;
+use crate::common::zup::{
+    layout,
+    read::{Node, Reader},
+};
 
 struct Walker {
     files: usize,
@@ -45,13 +46,19 @@ impl Walker {
     }
 }
 
-pub fn main() {
-    pretty_env_logger::init();
+#[derive(Parser)]
+pub struct ExtractArgs {
+    /// Path to the .zup archive to extract
+    pub archive: PathBuf,
+}
 
-    let zup = Reader::new("./webroot/crates/embassy-stm32/git.zup").unwrap();
+pub async fn run(args: ExtractArgs) -> anyhow::Result<()> {
+    let zup = Reader::new(&args.archive)?;
 
     let mut w = Walker::new();
     w.walk(zup.root_node(), "extract".to_string());
     println!("files {}", w.files);
-    println!("byes {}", w.bytes);
+    println!("bytes {}", w.bytes);
+
+    Ok(())
 }
