@@ -18,6 +18,8 @@ struct Cli {
 enum Commands {
     /// Build documentation archives from crate source
     Build(commands::build::BuildArgs),
+    /// Build documentation archives from crates.io release
+    BuildRelease(commands::build_release::BuildReleaseArgs),
     /// Serve documentation from archives
     Serve(commands::serve::ServeArgs),
     /// Extract zup archives
@@ -34,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Build(args) => commands::build::run(args).await,
+        Commands::BuildRelease(args) => commands::build_release::run(args).await,
         Commands::Serve(args) => commands::serve::run(args).await,
         Commands::Unzup(args) => commands::unzup::run(args).await,
         Commands::Zup(args) => commands::zup::run(args).await,

@@ -13,7 +13,7 @@ pub struct ZupArgs {
     /// Output .zup file
     #[clap(short, long)]
     pub output: PathBuf,
-    
+
     #[clap(flatten)]
     pub compression: CompressionArgs,
 }

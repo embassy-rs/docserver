@@ -422,20 +422,23 @@ impl Thing {
 #[derive(Parser)]
 pub struct ServeArgs {
     /// Path to the webroot containing crates and static files
-    #[clap(long, env = "DOCSERVER_PATH")]
-    pub path: Option<PathBuf>,
+    #[clap(long, env = "DOCSERVER_WEBROOT")]
+    pub webroot: Option<PathBuf>,
 }
 
 pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     let templates = Tera::new("templates/**/*.html").unwrap();
 
-    let path: PathBuf = args.path.unwrap_or_else(|| {
-        env::var_os("DOCSERVER_PATH")
-            .expect("Missing DOCSERVER_PATH environment variable or --path argument")
+    let webroot: PathBuf = args.webroot.unwrap_or_else(|| {
+        env::var_os("DOCSERVER_WEBROOT")
+            .expect("Missing DOCSERVER_WEBROOT environment variable or --webroot argument")
             .into()
     });
 
-    let thing = Thing { path, templates };
+    let thing = Thing {
+        path: webroot,
+        templates,
+    };
     let thing: &'static Thing = Box::leak(Box::new(thing));
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));

@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: embassy
+  name: docserver
+spec:
+  ports:
+  - protocol: TCP
+    name: web
+    port: 3000
+  selector:
+    app: docserver
+
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  namespace: embassy
+  name: docserver
+  labels:
+    app: docserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: docserver
+  template:
+    metadata:
+      labels:
+        app: docserver
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: docserver
+        image: $IMAGE
+        imagePullPolicy: Never
+        securityContext:
+          allowPrivilegeEscalation: false
+          seccompProfile:
+            type: RuntimeDefault
+          capabilities:
+            drop: [ALL]
+        ports:
+        - name: web
+          containerPort: 3000
+        env:
+        - name: DOCSERVER_WEBROOT
+          value: /data
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: docserver
+
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  namespace: embassy
+  name: docserver
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - match: Host("docs.embassy.dev")
+    kind: Rule
+    services:
+    - name: docserver
+      port: 3000
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  namespace: embassy
+  name: docserver
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 128Mi
+  storageClassName: local-path
