@@ -2,7 +2,8 @@ use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::common::zup::write::{pack, CompressConfig};
+use crate::common::zup::write::pack;
+use crate::common::CompressionArgs;
 
 #[derive(Parser)]
 pub struct ZupArgs {
@@ -12,18 +13,9 @@ pub struct ZupArgs {
     /// Output .zup file
     #[clap(short, long)]
     pub output: PathBuf,
-    /// Compress output with zstd
-    #[clap(short, long)]
-    pub compress: bool,
-    /// Compression level
-    #[clap(long, default_value = "7")]
-    pub compress_level: i32,
-    /// Compress dictionary size
-    #[clap(long, default_value = "163840")]
-    pub dict_size: usize,
-    /// Compress dictionary training set max size
-    #[clap(long, default_value = "100000000")]
-    pub dict_train_size: usize,
+    
+    #[clap(flatten)]
+    pub compression: CompressionArgs,
 }
 
 pub async fn run(args: ZupArgs) -> anyhow::Result<()> {
@@ -34,11 +26,7 @@ pub async fn run(args: ZupArgs) -> anyhow::Result<()> {
         fs::create_dir_all(p)?;
     }
 
-    let compress = args.compress.then(|| CompressConfig {
-        level: args.compress_level,
-        dict_size: args.dict_size,
-        dict_train_size: args.dict_train_size,
-    });
+    let compress = args.compression.to_config();
 
     // Pack the input directory using the new pack function
     pack(&args.input, &args.output, compress)?;

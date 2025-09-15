@@ -100,6 +100,7 @@ pub fn pack(
     };
 
     // Write stuff
+    println!("Packing...");
     let mut w = Writer {
         f,
         comp,

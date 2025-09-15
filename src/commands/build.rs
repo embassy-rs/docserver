@@ -8,7 +8,8 @@ use regex::bytes::Regex as ByteRegex;
 use regex::Regex;
 
 use crate::common::manifest;
-use crate::common::zup::write::{pack, CompressConfig};
+use crate::common::zup::write::pack;
+use crate::common::CompressionArgs;
 
 fn should_include_file(path: &Path) -> bool {
     path.file_name().map_or(true, |f| {
@@ -144,21 +145,8 @@ pub struct BuildArgs {
     #[clap(long, default_value = "./work")]
     pub temp_dir: PathBuf,
 
-    /// Compress output with zstd (only for .zup archives)
-    #[clap(short, long)]
-    pub compress: bool,
-
-    /// Compression level (only for .zup archives)
-    #[clap(long, default_value = "7")]
-    pub compress_level: i32,
-
-    /// Compress dictionary size (only for .zup archives)
-    #[clap(long, default_value = "163840")]
-    pub dict_size: usize,
-
-    /// Compress dictionary training set max size (only for .zup archives)
-    #[clap(long, default_value = "100000000")]
-    pub dict_train_size: usize,
+    #[clap(flatten)]
+    pub compression: CompressionArgs,
 }
 
 // Helper function to copy and process a directory recursively
@@ -367,11 +355,7 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
             fs::create_dir_all(parent)?;
         }
 
-        let compress = args.compress.then(|| CompressConfig {
-            level: args.compress_level,
-            dict_size: args.dict_size,
-            dict_train_size: args.dict_train_size,
-        });
+        let compress = args.compression.to_config();
 
         pack(&build_output_dir, &args.output, compress)?;
 
