@@ -298,8 +298,7 @@ impl Thing {
                         ))
                     }
                     x => x?,
-                }
-                .into_owned();
+                };
 
                 let ext = extension(path[path.len() - 1]);
                 let mime = mime_type(ext);

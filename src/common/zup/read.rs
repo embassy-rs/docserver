@@ -54,7 +54,7 @@ impl Reader {
         Ok(buffer)
     }
 
-    fn read_node(&self, node: layout::Node) -> io::Result<Cow<'_, [u8]>> {
+    fn read_node(&self, node: layout::Node) -> io::Result<Vec<u8>> {
         let data = Self::read_range(&self.file, node.range)?;
         if node.flags & layout::FLAG_COMPRESSED != 0 {
             let Some(dict) = &self.dict else {
@@ -66,9 +66,9 @@ impl Reader {
             let mut res = Vec::new();
             let mut dec = Decoder::with_prepared_dictionary(&data[..], dict)?;
             dec.read_to_end(&mut res)?;
-            Ok(Cow::Owned(res))
+            Ok(res)
         } else {
-            Ok(Cow::Owned(data))
+            Ok(data)
         }
     }
 
@@ -107,7 +107,7 @@ impl Reader {
         Ok(node)
     }
 
-    pub fn read(&self, path: &[&str]) -> io::Result<Cow<'_, [u8]>> {
+    pub fn read(&self, path: &[&str]) -> io::Result<Vec<u8>> {
         match self.open(path)? {
             Node::Directory(_) => {
                 return Err(io::Error::new(
@@ -143,7 +143,7 @@ impl<'a> File<'a> {
     pub fn node(&self) -> layout::Node {
         self.node
     }
-    pub fn read(&self) -> io::Result<Cow<'a, [u8]>> {
+    pub fn read(&self) -> io::Result<Vec<u8>> {
         self.reader.read_node(self.node)
     }
 }
