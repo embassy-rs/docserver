@@ -45,6 +45,10 @@ impl Reader {
     }
 
     fn read_range(file: &fs::File, r: layout::Range) -> io::Result<Vec<u8>> {
+        if r.len > 100_000_000 {
+            return Err(io::Error::other("range too large"));
+        }
+
         let mut buffer = vec![0u8; r.len as usize];
         file.read_exact_at(&mut buffer, r.offset)?;
         Ok(buffer)
