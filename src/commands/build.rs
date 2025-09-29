@@ -305,6 +305,13 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
             fs::rename(&search_desc, doc_crate_dir.join("search.desc")).unwrap();
         }
 
+        // new search index (post nightly-2025-08-xx)
+        let search_index = doc_dir.join("search.index");
+        if search_index.exists() {
+            fs::rename(&search_index, doc_crate_dir.join("search.index")).unwrap();
+        }
+
+        // old search index (pre nightly-2025-08-xx)
         let search_index = doc_dir.join("search-index.js");
         if search_index.exists() {
             let bytes = fs::read(&search_index).unwrap();

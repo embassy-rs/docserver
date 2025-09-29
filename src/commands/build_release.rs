@@ -53,37 +53,43 @@ pub struct BuildReleaseArgs {
 
 async fn fetch_crate_versions(crate_name: &str) -> Result<Vec<String>> {
     let url = format!("https://crates.io/api/v1/crates/{}", crate_name);
-    
+
     let mut cmd = Command::new("curl");
     cmd.args(&["-s", "-f", &url]);
-    
+
     let output = cmd.output().context("Failed to execute curl command")?;
-    
+
     if !output.status.success() {
         return Err(anyhow::anyhow!(
             "Failed to fetch crate info for {}: curl exited with status {}",
-            crate_name, output.status
+            crate_name,
+            output.status
         ));
     }
-    
-    let response_text = String::from_utf8(output.stdout)
-        .context("Failed to parse curl output as UTF-8")?;
-    
-    let response: CratesIoResponse = serde_json::from_str(&response_text)
-        .context("Failed to parse crates.io API response")?;
-    
+
+    let response_text =
+        String::from_utf8(output.stdout).context("Failed to parse curl output as UTF-8")?;
+
+    let response: CratesIoResponse =
+        serde_json::from_str(&response_text).context("Failed to parse crates.io API response")?;
+
     // Filter out yanked versions and 0.0.x versions
-    let versions: Vec<String> = response.versions
+    let versions: Vec<String> = response
+        .versions
         .into_iter()
         .filter(|v| !v.yanked)
         .map(|v| v.version)
         .filter(|v| !v.starts_with("0.0."))
         .collect();
-    
+
     Ok(versions)
 }
 
-async fn build_single_version(crate_name: &str, version: &str, args: &BuildReleaseArgs) -> Result<()> {
+async fn build_single_version(
+    crate_name: &str,
+    version: &str,
+    args: &BuildReleaseArgs,
+) -> Result<()> {
     println!(
         "Downloading crate {} version {} from crates.io",
         crate_name, version
@@ -234,38 +240,38 @@ pub async fn run(args: BuildReleaseArgs) -> Result<()> {
     if args.all_versions {
         // Build all versions
         println!("Fetching all versions for crate: {}", args.crate_name);
-        
+
         let all_versions = fetch_crate_versions(&args.crate_name).await?;
-        
+
         if all_versions.is_empty() {
             println!("No valid versions found for crate: {}", args.crate_name);
             return Ok(());
         }
-        
+
         println!("Found {} versions to potentially build", all_versions.len());
-        
+
         // Create crate directory in webroot to check existing versions
         let crate_webroot_dir = args.webroot.join("crates").join(&args.crate_name);
         fs::create_dir_all(&crate_webroot_dir)?;
-        
+
         let mut built_count = 0;
         let mut skipped_count = 0;
-        
+
         for version in all_versions {
             let zup_path = crate_webroot_dir.join(format!("{}.zup", version));
-            
+
             if zup_path.exists() && !args.force {
                 println!("Skipping version {} (already exists)", version);
                 skipped_count += 1;
                 continue;
             }
-            
+
             if zup_path.exists() && args.force {
                 println!("Rebuilding version {} (--force specified)", version);
             } else {
                 println!("Building version {}", version);
             }
-            
+
             match build_single_version(&args.crate_name, &version, &args).await {
                 Ok(()) => {
                     println!("Successfully built version {}", version);
@@ -277,29 +283,36 @@ pub async fn run(args: BuildReleaseArgs) -> Result<()> {
                 }
             }
         }
-        
-        println!("Built {} new versions, skipped {} existing versions", built_count, skipped_count);
+
+        println!(
+            "Built {} new versions, skipped {} existing versions",
+            built_count, skipped_count
+        );
     } else {
         // Build single version
         let version = args.version.as_ref().unwrap(); // Safe due to validation above
-        
+
         // Check if version already exists before building
         let crate_webroot_dir = args.webroot.join("crates").join(&args.crate_name);
         let zup_path = crate_webroot_dir.join(format!("{}.zup", version));
-        
+
         if zup_path.exists() && !args.force {
-            println!("Version {} already exists at: {}", version, zup_path.display());
+            println!(
+                "Version {} already exists at: {}",
+                version,
+                zup_path.display()
+            );
             println!("Use --force to rebuild, or remove the existing file first.");
             return Ok(());
         }
-        
+
         if zup_path.exists() && args.force {
             println!("Rebuilding version {} (--force specified)", version);
         }
-        
+
         build_single_version(&args.crate_name, version, &args).await?;
         println!("Successfully built version {}", version);
     }
-    
+
     Ok(())
 }
