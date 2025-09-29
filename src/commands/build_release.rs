@@ -43,6 +43,10 @@ pub struct BuildReleaseArgs {
     #[clap(long, default_value = "./work")]
     pub temp_dir: PathBuf,
 
+    /// Force rebuild even if the output file already exists
+    #[clap(long)]
+    pub force: bool,
+
     #[clap(flatten)]
     pub compression: CompressionArgs,
 }
@@ -250,13 +254,17 @@ pub async fn run(args: BuildReleaseArgs) -> Result<()> {
         for version in all_versions {
             let zup_path = crate_webroot_dir.join(format!("{}.zup", version));
             
-            if zup_path.exists() {
+            if zup_path.exists() && !args.force {
                 println!("Skipping version {} (already exists)", version);
                 skipped_count += 1;
                 continue;
             }
             
-            println!("Building version {}", version);
+            if zup_path.exists() && args.force {
+                println!("Rebuilding version {} (--force specified)", version);
+            } else {
+                println!("Building version {}", version);
+            }
             
             match build_single_version(&args.crate_name, &version, &args).await {
                 Ok(()) => {
@@ -279,10 +287,14 @@ pub async fn run(args: BuildReleaseArgs) -> Result<()> {
         let crate_webroot_dir = args.webroot.join("crates").join(&args.crate_name);
         let zup_path = crate_webroot_dir.join(format!("{}.zup", version));
         
-        if zup_path.exists() {
+        if zup_path.exists() && !args.force {
             println!("Version {} already exists at: {}", version, zup_path.display());
             println!("Use --force to rebuild, or remove the existing file first.");
             return Ok(());
+        }
+        
+        if zup_path.exists() && args.force {
+            println!("Rebuilding version {} (--force specified)", version);
         }
         
         build_single_version(&args.crate_name, version, &args).await?;
