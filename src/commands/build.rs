@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command};
+use std::process::{self, Command, Stdio};
 
 use clap::Parser;
 use regex::bytes::Regex as ByteRegex;
@@ -246,37 +247,56 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         .arg(&cargo_target_dir)
         .arg("-Zunstable-options")
         .arg("-Zrustdoc-map")
-        .env("CARGO_TARGET_DIR", &cargo_target_dir);
+        .arg("--stdin")
+        .env("CARGO_TARGET_DIR", &cargo_target_dir)
+        .stdin(Stdio::piped());
 
-    for (i, flavor) in flavors.iter().enumerate() {
-        cmd.arg("---")
-            .arg("rustdoc")
-            .arg("--manifest-path")
-            .arg(args.input.join("Cargo.toml").to_str().unwrap())
-            .arg("--artifact-dir")
-            .arg(cargo_out_dir.join(i.to_string()))
-            .arg("--features")
-            .arg(&flavor.features.join(","))
-            .arg("--target")
-            .arg(&flavor.target)
-            .arg("--")
-            .arg("-Zunstable-options")
-            .arg("--static-root-path")
-            .arg("/static/");
+    let mut child = cmd.spawn()?;
+    {
+        let mut stdin = child.stdin.take().unwrap();
 
-        for (dep_name, dep) in &manifest.dependencies {
-            if let Some(_) = &dep.path {
-                cmd.arg(format!(
-                    "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
-                    dep_name.replace('-', "_"),
-                    dep_name,
-                ));
+        for (i, flavor) in flavors.iter().enumerate() {
+            let mut cmdargs = Vec::<String>::new();
+
+            cmdargs.push("rustdoc".to_string());
+            cmdargs.push("--manifest-path".to_string());
+            cmdargs.push(args.input.join("Cargo.toml").to_str().unwrap().to_string());
+            cmdargs.push("--artifact-dir".to_string());
+            cmdargs.push(
+                cargo_out_dir
+                    .join(i.to_string())
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            );
+            cmdargs.push("--features".to_string());
+            cmdargs.push(flavor.features.join(",").to_string());
+            cmdargs.push("--target".to_string());
+            cmdargs.push(flavor.target.to_string());
+            cmdargs.push("--".to_string());
+            cmdargs.push("-Zunstable-options".to_string());
+            cmdargs.push("--static-root-path".to_string());
+            cmdargs.push("/static/".to_string());
+
+            for (dep_name, dep) in &manifest.dependencies {
+                if let Some(_) = &dep.path {
+                    cmdargs.push(format!(
+                        "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
+                        dep_name.replace('-', "_"),
+                        dep_name,
+                    ));
+                }
             }
+
+            writeln!(stdin, "{}", shell_words::join(cmdargs));
         }
     }
 
     println!("Running cargo batch with {} flavors...", flavors.len());
-    let status = cmd.status().expect("failed to execute process");
+    let status = child
+        .wait_with_output()
+        .expect("failed to execute process")
+        .status;
 
     if !status.success() {
         println!("===============");
