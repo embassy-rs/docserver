@@ -3,19 +3,11 @@ use std::fs;
 use std::io;
 use std::io::Read;
 #[cfg(target_os = "windows")]
-use std::io::{Error, ErrorKind};
+use std::io::{Seek, SeekFrom};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::FileExt;
-#[cfg(target_os = "windows")]
-use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::str;
-#[cfg(target_os = "windows")]
-use windows::Win32::Foundation::HANDLE;
-#[cfg(target_os = "windows")]
-use windows::Win32::Storage::FileSystem::ReadFile;
-#[cfg(target_os = "windows")]
-use windows::Win32::System::IO::OVERLAPPED;
 use zstd::Decoder;
 use zstd::dict::DecoderDictionary;
 
@@ -27,46 +19,9 @@ fn read_exact_at(file: &fs::File, buffer: &mut Vec<u8>, offset: u64) -> io::Resu
 }
 
 #[cfg(target_os = "windows")]
-fn read_exact_at(file: &fs::File, buffer: &mut Vec<u8>, offset: u64) -> io::Result<()> {
-    if buffer.is_empty() {
-        return Ok(());
-    }
-
-    // Prepare OVERLAPPED structure with the offset
-    let mut overlapped = OVERLAPPED::default();
-    overlapped.Anonymous.Anonymous.Offset = offset as u32;
-    overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-
-    let handle = HANDLE(file.as_raw_handle());
-
-    let mut total_read = 0;
-    while total_read < buffer.len() {
-        let mut bytes_read: u32 = 0;
-        let success = unsafe {
-            ReadFile(
-                handle,
-                Some(&mut buffer[total_read..]),
-                Some(&mut bytes_read),
-                Some(&mut overlapped),
-            )
-        };
-
-        if !success.is_ok() {
-            return Err(Error::last_os_error());
-        }
-
-        if bytes_read == 0 {
-            return Err(Error::new(ErrorKind::UnexpectedEof, "Unexpected EOF"));
-        }
-
-        total_read += bytes_read as usize;
-        // Advance offset in OVERLAPPED for next chunk
-        let new_offset = offset + total_read as u64;
-        overlapped.Anonymous.Anonymous.Offset = new_offset as u32;
-        overlapped.Anonymous.Anonymous.OffsetHigh = (new_offset >> 32) as u32;
-    }
-
-    Ok(())
+fn read_exact_at(mut file: &fs::File, buffer: &mut Vec<u8>, offset: u64) -> io::Result<()> {
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(buffer)
 }
 
 pub struct Reader {
