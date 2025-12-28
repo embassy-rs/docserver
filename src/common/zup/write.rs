@@ -155,7 +155,7 @@ impl Writer {
             self.stats.total_files += 1;
 
             let buf = fs::read(path)?;
-            let mut res = self.write_node(&buf)?;
+            let res = self.write_node(&buf)?;
             Ok(res)
         }
     }

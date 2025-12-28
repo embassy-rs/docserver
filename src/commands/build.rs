@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 
 use clap::Parser;
-use regex::bytes::Regex as ByteRegex;
 use regex::Regex;
+use regex::bytes::Regex as ByteRegex;
 
+use crate::common::CompressionArgs;
 use crate::common::manifest;
 use crate::common::zup::write::pack;
-use crate::common::CompressionArgs;
 
 fn should_include_file(path: &Path) -> bool {
     path.file_name().map_or(true, |f| {
@@ -288,7 +288,7 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
                 }
             }
 
-            writeln!(stdin, "{}", shell_words::join(cmdargs));
+            writeln!(stdin, "{}", shell_words::join(cmdargs))?;
         }
     }
 

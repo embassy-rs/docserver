@@ -1,14 +1,69 @@
-use std::borrow::Cow;
 use std::cell::Cell;
 use std::fs;
-use std::io::{self, Read};
+use std::io::Read;
+use std::io::{self, Error, ErrorKind};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::FileExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::str;
-use zstd::dict::DecoderDictionary;
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::HANDLE;
+#[cfg(target_os = "windows")]
+use windows::Win32::Storage::FileSystem::ReadFile;
+use windows::Win32::System::IO::OVERLAPPED;
 use zstd::Decoder;
+use zstd::dict::DecoderDictionary;
 
 use super::layout;
+
+#[cfg(target_os = "linux")]
+fn read_exact_at(file: &fs::File, buffer: &mut Vec<u8>, offset: u64) -> io::Result<()> {
+    file.read_exact_at(&mut buffer, offset)
+}
+
+#[cfg(target_os = "windows")]
+fn read_exact_at(file: &fs::File, buffer: &mut Vec<u8>, offset: u64) -> io::Result<()> {
+    if buffer.is_empty() {
+        return Ok(());
+    }
+
+    // Prepare OVERLAPPED structure with the offset
+    let mut overlapped = OVERLAPPED::default();
+    overlapped.Anonymous.Anonymous.Offset = offset as u32;
+    overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
+
+    let handle = HANDLE(file.as_raw_handle());
+
+    let mut total_read = 0;
+    while total_read < buffer.len() {
+        let mut bytes_read: u32 = 0;
+        let success = unsafe {
+            ReadFile(
+                handle,
+                Some(&mut buffer[total_read..]),
+                Some(&mut bytes_read),
+                Some(&mut overlapped),
+            )
+        };
+
+        if !success.is_ok() {
+            return Err(Error::last_os_error());
+        }
+
+        if bytes_read == 0 {
+            return Err(Error::new(ErrorKind::UnexpectedEof, "Unexpected EOF"));
+        }
+
+        total_read += bytes_read as usize;
+        // Advance offset in OVERLAPPED for next chunk
+        let new_offset = offset + total_read as u64;
+        overlapped.Anonymous.Anonymous.Offset = new_offset as u32;
+        overlapped.Anonymous.Anonymous.OffsetHigh = (new_offset >> 32) as u32;
+    }
+
+    Ok(())
+}
 
 pub struct Reader {
     file: fs::File,
@@ -23,7 +78,8 @@ impl Reader {
 
         // Read the superblock from the end of the file
         let mut superblock_buf = vec![0u8; layout::Superblock::LEN];
-        file.read_exact_at(
+        read_exact_at(
+            &file,
             &mut superblock_buf,
             file_size - layout::Superblock::LEN as u64,
         )?;
@@ -50,7 +106,7 @@ impl Reader {
         }
 
         let mut buffer = vec![0u8; r.len as usize];
-        file.read_exact_at(&mut buffer, r.offset)?;
+        read_exact_at(&file, &mut buffer, r.offset)?;
         Ok(buffer)
     }
 
@@ -87,7 +143,7 @@ impl Reader {
                     return Err(io::Error::new(
                         io::ErrorKind::NotADirectory,
                         format!("is a file, not a directory: {}", path[..i].join("/")),
-                    ))
+                    ));
                 }
                 Node::Directory(dir) => {
                     let (_, child) = dir
@@ -113,7 +169,7 @@ impl Reader {
                 return Err(io::Error::new(
                     io::ErrorKind::IsADirectory,
                     format!("is a directory, not a file: {}", path.join("/")),
-                ))
+                ));
             }
             Node::File(f) => f.read(),
         }
@@ -220,12 +276,18 @@ impl<'a> ByteReader<'a> {
     fn read_u8(&self) -> Result<u8, ReadError> {
         Ok(u8::from_le_bytes(self.read()?))
     }
+
+    #[allow(dead_code)]
     fn read_u16(&self) -> Result<u16, ReadError> {
         Ok(u16::from_le_bytes(self.read()?))
     }
+
+    #[allow(dead_code)]
     fn read_u32(&self) -> Result<u32, ReadError> {
         Ok(u32::from_le_bytes(self.read()?))
     }
+
+    #[allow(dead_code)]
     fn read_u64(&mut self) -> Result<u64, ReadError> {
         Ok(u64::from_le_bytes(self.read()?))
     }
@@ -241,6 +303,7 @@ impl<'a> ByteReader<'a> {
         self.read_slice(len)
     }
 
+    #[allow(dead_code)]
     fn read_slice_len16(&self) -> Result<&[u8], ReadError> {
         let len = self.read_u16()? as usize;
         self.read_slice(len)
