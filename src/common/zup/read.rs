@@ -1,9 +1,12 @@
 use std::cell::Cell;
 use std::fs;
+use std::io;
 use std::io::Read;
-use std::io::{self, Error, ErrorKind};
+#[cfg(target_os = "windows")]
+use std::io::{Error, ErrorKind};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::FileExt;
+#[cfg(target_os = "windows")]
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::str;
@@ -11,6 +14,7 @@ use std::str;
 use windows::Win32::Foundation::HANDLE;
 #[cfg(target_os = "windows")]
 use windows::Win32::Storage::FileSystem::ReadFile;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::IO::OVERLAPPED;
 use zstd::Decoder;
 use zstd::dict::DecoderDictionary;
@@ -19,7 +23,7 @@ use super::layout;
 
 #[cfg(target_os = "linux")]
 fn read_exact_at(file: &fs::File, buffer: &mut Vec<u8>, offset: u64) -> io::Result<()> {
-    file.read_exact_at(&mut buffer, offset)
+    file.read_exact_at(buffer, offset)
 }
 
 #[cfg(target_os = "windows")]
