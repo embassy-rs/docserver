@@ -15,6 +15,7 @@ pub struct Manifest {
     pub dependencies: HashMap<String, Dependency>,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum DependencyEnum {
@@ -22,6 +23,7 @@ pub enum DependencyEnum {
     Full(Dependency),
 }
 
+#[allow(dead_code)]
 pub struct Dependency {
     pub version: Option<String>,
     pub path: Option<String>,
@@ -79,6 +81,7 @@ impl<'de> Deserialize<'de> for Dependency {
 #[derive(Deserialize)]
 pub struct Package {
     pub name: String,
+    #[allow(dead_code)]
     pub version: String,
     #[serde(default)]
     pub metadata: Metadata,
