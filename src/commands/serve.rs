@@ -193,9 +193,14 @@ impl Thing {
                 .get(&format!("crate-{}-version", krate))
                 .map(|s| s.as_str());
         }
-        let mut version = version.unwrap_or(&versions[0]);
+        // Default to latest non-git version
+        let default_version = versions
+            .iter()
+            .find(|v| *v != "git")
+            .unwrap_or(&versions[0]);
+        let mut version = version.unwrap_or(default_version);
         if versions.iter().find(|s| *s == version).is_none() {
-            version = &versions[0];
+            version = default_version;
         }
 
         // Flavor
@@ -389,8 +394,17 @@ impl Thing {
                         context.insert("crate", &krate);
                         context.insert("version", &version);
                         context.insert("flavor", &flavor);
-                        context.insert("crates", &self.list_crates().unwrap());
-                        context.insert("versions", &self.list_versions(krate).unwrap());
+                        let crates_list = self.list_crates().unwrap();
+                        let versions_list = self.list_versions(krate).unwrap();
+                        // Determine latest version: first non-git version
+                        let latest_version = versions_list
+                            .iter()
+                            .find(|v| v.as_str() != "git")
+                            .map(|s| s.as_str())
+                            .unwrap_or(version);
+                        context.insert("crates", &crates_list);
+                        context.insert("versions", &versions_list);
+                        context.insert("latest_version", &latest_version);
                         context.insert("flavors", &self.list_flavors(krate, version).unwrap());
 
                         let rendered_head = self.templates.render("head.html", &context).unwrap();
