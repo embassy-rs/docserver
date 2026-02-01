@@ -232,6 +232,36 @@ impl Thing {
             // Serve static file
             &["static", ref path @ ..] => self.serve_static(&path.join("/")).await,
 
+            // JSON API endpoints
+            &["api", "crates"] => {
+                let crates = self.list_crates()?;
+                let crates: Vec<_> = crates
+                    .iter()
+                    .map(|name| serde_json::json!({"name": name}))
+                    .collect();
+                let json = serde_json::to_string(&crates)?;
+                let mut resp = Response::new(Body::from(json));
+                resp.headers_mut()
+                    .insert("Content-Type", HeaderValue::from_static("application/json"));
+                Ok(resp)
+            }
+            &["api", "crates", krate, "versions"] => {
+                let versions = match self.list_versions(krate) {
+                    Ok(v) => v,
+                    Err(e) if e.kind() == ErrorKind::NotFound => return self.resp_404(),
+                    Err(e) => return Err(e.into()),
+                };
+                let versions: Vec<_> = versions
+                    .iter()
+                    .map(|version| serde_json::json!({"version": version}))
+                    .collect();
+                let json = serde_json::to_string(&versions)?;
+                let mut resp = Response::new(Body::from(json));
+                resp.headers_mut()
+                    .insert("Content-Type", HeaderValue::from_static("application/json"));
+                Ok(resp)
+            }
+
             &[] => self.guess_redirect(&req, None, None).await,
             &[krate] => self.guess_redirect(&req, Some(krate), None).await,
             &[krate, version] => self.guess_redirect(&req, Some(krate), Some(version)).await,
