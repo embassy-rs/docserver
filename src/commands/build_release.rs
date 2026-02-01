@@ -47,6 +47,10 @@ pub struct BuildReleaseArgs {
     #[clap(long)]
     pub force: bool,
 
+    /// Server URL to check for already-built versions (used with --all-versions)
+    #[clap(long)]
+    pub server_url: Option<String>,
+
     #[clap(flatten)]
     pub compression: CompressionArgs,
 }
@@ -81,6 +85,35 @@ async fn fetch_crate_versions(crate_name: &str) -> Result<Vec<String>> {
         .map(|v| v.version)
         .filter(|v| !v.starts_with("0.0."))
         .collect();
+
+    Ok(versions)
+}
+
+#[derive(Deserialize)]
+struct ServerVersionInfo {
+    version: String,
+}
+
+async fn fetch_server_versions(server_url: &str, crate_name: &str) -> Result<Vec<String>> {
+    let url = format!("{}/api/crates/{}/versions", server_url, crate_name);
+
+    let mut cmd = Command::new("curl");
+    cmd.args(&["-s", "-f", &url]);
+
+    let output = cmd.output().context("Failed to execute curl command")?;
+
+    if !output.status.success() {
+        // Server might not have this crate yet, which is fine
+        return Ok(Vec::new());
+    }
+
+    let response_text =
+        String::from_utf8(output.stdout).context("Failed to parse curl output as UTF-8")?;
+
+    let response: Vec<ServerVersionInfo> =
+        serde_json::from_str(&response_text).context("Failed to parse server API response")?;
+
+    let versions: Vec<String> = response.into_iter().map(|v| v.version).collect();
 
     Ok(versions)
 }
@@ -250,6 +283,23 @@ pub async fn run(args: BuildReleaseArgs) -> Result<()> {
 
         println!("Found {} versions to potentially build", all_versions.len());
 
+        // Fetch already-built versions from server if URL is provided
+        let server_versions = if let Some(ref server_url) = args.server_url {
+            println!("Checking server for already-built versions...");
+            match fetch_server_versions(server_url, &args.crate_name).await {
+                Ok(versions) => {
+                    println!("Found {} versions on server", versions.len());
+                    versions
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to fetch server versions: {}", e);
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
         // Create crate directory in webroot to check existing versions
         let crate_webroot_dir = args.webroot.join("crates").join(&args.crate_name);
         fs::create_dir_all(&crate_webroot_dir)?;
@@ -260,8 +310,16 @@ pub async fn run(args: BuildReleaseArgs) -> Result<()> {
         for version in all_versions {
             let zup_path = crate_webroot_dir.join(format!("{}.zup", version));
 
+            // Skip if already exists locally
             if zup_path.exists() && !args.force {
-                println!("Skipping version {} (already exists)", version);
+                println!("Skipping version {} (already exists locally)", version);
+                skipped_count += 1;
+                continue;
+            }
+
+            // Skip if already exists on server
+            if !args.force && server_versions.contains(&version) {
+                println!("Skipping version {} (already exists on server)", version);
                 skipped_count += 1;
                 continue;
             }
