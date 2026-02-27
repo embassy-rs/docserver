@@ -305,7 +305,8 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
 
     if !status.success() {
         println!("===============");
-        println!("failed to execute cmd : {:?}", cmd);
+        println!("failed to execute cmd :");
+        println!("{:?}", cmd);
         println!("{}", debug);
         println!("exit code : {:?}", status);
         println!("===============");
