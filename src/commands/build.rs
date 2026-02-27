@@ -1,6 +1,7 @@
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::fs;
-use std::io::Write;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 
@@ -252,6 +253,7 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         .stdin(Stdio::piped());
 
     let mut child = cmd.spawn()?;
+    let mut debug = String::new();
     {
         let mut stdin = child.stdin.take().unwrap();
 
@@ -288,7 +290,10 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
                 }
             }
 
-            writeln!(stdin, "{}", shell_words::join(cmdargs))?;
+            let line = shell_words::join(cmdargs);
+
+            writeln!(stdin, "{}", &line)?;
+            writeln!(debug, "    --- {}", &line)?;
         }
     }
 
@@ -301,10 +306,13 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
     if !status.success() {
         println!("===============");
         println!("failed to execute cmd : {:?}", cmd);
+        println!("{}", debug);
         println!("exit code : {:?}", status);
         println!("===============");
         process::exit(1);
     }
+
+    drop(debug);
 
     // Create flavors directory in output
     let flavors_dir = build_output_dir.join("flavors");
