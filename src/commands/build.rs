@@ -147,6 +147,10 @@ pub struct BuildArgs {
     #[clap(long, default_value = "./work")]
     pub temp_dir: PathBuf,
 
+    /// Whether to cleanup the temporary directory after building
+    #[clap(long)]
+    pub cleanup: bool,
+
     #[clap(flatten)]
     pub compression: CompressionArgs,
 }
@@ -398,6 +402,10 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         println!("Archive created: {:?}", args.output);
     } else {
         println!("Output written to: {:?}", build_output_dir);
+    }
+
+    if args.cleanup {
+        fs::remove_dir_all(args.temp_dir)?;
     }
 
     Ok(())
