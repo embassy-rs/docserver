@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use serde::Deserialize;
 
-use crate::commands::build::{run as build_run, BuildArgs};
+use crate::commands::build::{BuildArgs, run as build_run};
 use crate::common::CompressionArgs;
 
 #[derive(Deserialize)]
@@ -50,6 +50,10 @@ pub struct BuildReleaseArgs {
     /// Server URL to check for already-built versions (used with --all-versions)
     #[clap(long)]
     pub server_url: Option<String>,
+
+    /// Whether to cleanup the temporary directory after building
+    #[clap(long)]
+    pub cleanup: bool,
 
     #[clap(flatten)]
     pub compression: CompressionArgs,
@@ -187,8 +191,10 @@ async fn build_single_version(
     let status = cmd.status().context("Failed to execute curl command")?;
     if !status.success() {
         return Err(anyhow::anyhow!(
-            "Failed to download crate {}-{}: curl exited with status {}. Check that the crate name and version are correct.", 
-            crate_name, version, status
+            "Failed to download crate {}-{}: curl exited with status {}. Check that the crate name and version are correct.",
+            crate_name,
+            version,
+            status
         ));
     }
 
@@ -216,7 +222,7 @@ async fn build_single_version(
 
     if !crate_dir.exists() {
         return Err(anyhow::anyhow!(
-            "Expected extracted directory does not exist: {}. The crate archive may not have the expected structure.", 
+            "Expected extracted directory does not exist: {}. The crate archive may not have the expected structure.",
             crate_dir.display()
         ));
     }
@@ -248,6 +254,7 @@ async fn build_single_version(
         output: output_zup_path,
         output_static: Some(output_static_dir),
         temp_dir: args.temp_dir.clone(),
+        cleanup: args.cleanup,
         compression: args.compression.clone(),
     };
 
