@@ -1,7 +1,7 @@
+use blake3;
 use rand::seq::SliceRandom;
-use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 use super::layout;
 
 fn hash(data: &[u8]) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    hash.update(data);
-    hash.finalize().into()
+    *blake3::hash(data).as_bytes()
 }
 
 pub struct CompressConfig {
@@ -65,6 +63,7 @@ pub fn pack(
             // Start grabbing files, stop when we reach dict_train_size
             let mut training_data = Vec::new();
             let mut total_len = 0;
+            let mut hash_dedup = HashSet::<[u8; 32]>::new();
 
             for file_path in file_paths {
                 if total_len >= compress.dict_train_size {
@@ -72,6 +71,11 @@ pub fn pack(
                 }
 
                 let file_data = fs::read(&file_path)?;
+                let file_hash = hash(&file_data);
+                if !hash_dedup.insert(file_hash) {
+                    continue;
+                }
+
                 total_len += file_data.len();
                 training_data.push(file_data);
             }
