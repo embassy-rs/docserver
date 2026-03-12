@@ -26,12 +26,12 @@ tokio = { version = "1", features = [
     "test-util",
     "signal",
 ] }
-toml = "0.9.12"
+toml = "1.0.6"
 zstd = "0.13.3"
 tera = "1"
 serde_json = "1.0.149"
 clap = { version = "4.5.60", features = ["derive", "env"] }
-rand = "0.9.2"
+rand = "0.10.0"
 shell-words = "1.1.1"
 blake3 = "1.8.3"
 
