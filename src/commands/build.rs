@@ -247,8 +247,7 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
 
     // Build the cargo batch command
     let mut cmd = Command::new("cargo");
-    cmd.arg("+nightly")
-        .arg("batch")
+    cmd.arg("batch")
         .arg("--target-dir")
         .arg(&cargo_target_dir)
         .arg("-Zunstable-options")
