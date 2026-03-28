@@ -139,7 +139,7 @@ impl Writer {
         if m.is_dir() {
             self.stats.total_dirs += 1;
 
-            let mut readdir: Vec<_> = fs::read_dir(&path)?.try_collect()?;
+            let mut readdir: Vec<_> = fs::read_dir(&path)?.collect::<Result<Vec<_>, _>>()?;
             readdir.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
             let mut buf = Vec::new();
