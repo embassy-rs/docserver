@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 
 use clap::Parser;
-use regex::Regex;
 use regex::bytes::Regex as ByteRegex;
+use regex::{Regex, bytes};
 
 use crate::common::CompressionArgs;
 use crate::common::manifest;
@@ -19,50 +19,107 @@ fn should_include_file(path: &Path) -> bool {
     })
 }
 
-fn process_html_file(crate_name: &str, data: Vec<u8>) -> Vec<u8> {
-    let crate_name = crate_name.replace('-', "_");
+struct FlavorProcessor {
+    re_remove_settings: bytes::Regex,
+    re_remove_hidden_src: bytes::Regex,
+    re_rewrite_src: bytes::Regex,
+    re_remove_cratesjs: bytes::Regex,
+    re_rewrite_root: bytes::Regex,
+    re_fix_root_path: bytes::Regex,
+    crate_name: String,
+}
 
-    // Remove settings button (it breaks due to the path rewriting, we'll provide our own version)
-    let re_remove_settings = ByteRegex::new(r##"<a id="settings-menu".*?</a>"##).unwrap();
+impl FlavorProcessor {
+    pub fn new(crate_name: &str) -> Self {
+        let crate_name = crate_name.replace('-', "_");
 
-    // Remove srclinks that point to a file starting with `_`.
-    let re_remove_hidden_src =
-        ByteRegex::new(r##"<a class="src" href="[^"]*/_[^"]*">source</a>"##).unwrap();
+        // Remove settings button (it breaks due to the path rewriting, we'll provide our own version)
+        let re_remove_settings = ByteRegex::new(r##"<a id="settings-menu".*?</a>"##).unwrap();
 
-    // Rewrite srclinks from `../../crate_name/foo" to "/__DOCSERVER_SRCLINK/foo".
-    let re_rewrite_src =
-        ByteRegex::new(&format!(r##"href="(\.\./)+src/{}"##, &crate_name)).unwrap();
+        // Remove srclinks that point to a file starting with `_`.
+        let re_remove_hidden_src =
+            ByteRegex::new(r##"<a class="src" href="[^"]*/_[^"]*">source</a>"##).unwrap();
 
-    // Remove crates.js
-    let re_remove_cratesjs =
-        ByteRegex::new(r##"<script\s*(?:defer(="")?)?\s*src="(\.\./)+crates.js"></script>"##)
-            .unwrap();
+        // Rewrite srclinks from `../../crate_name/foo" to "/__DOCSERVER_SRCLINK/foo".
+        let re_rewrite_src =
+            ByteRegex::new(&format!(r##"href="(\.\./)+src/{}"##, &crate_name)).unwrap();
 
-    // Rewrite links from `../crate_name" to "".
-    let re_rewrite_root = ByteRegex::new(&format!(r##"\.\./{}/"##, &crate_name)).unwrap();
+        // Remove crates.js
+        let re_remove_cratesjs =
+            ByteRegex::new(r##"<script\s*(?:defer(="")?)?\s*src="(\.\./)+crates.js"></script>"##)
+                .unwrap();
 
-    let re_fix_root_path = ByteRegex::new(r##"data-root-path="\.\./"##).unwrap();
+        // Rewrite links from `../crate_name" to "".
+        let re_rewrite_root = ByteRegex::new(&format!(r##"\.\./{}/"##, &crate_name)).unwrap();
 
-    let res = re_remove_settings.replace_all(&data, &[][..]).into_owned();
-    let res = re_remove_hidden_src.replace_all(&res, &[][..]).into_owned();
-    let res = re_remove_cratesjs
-        .replace_all(
-            &res,
-            format!(
-                r##"<script type="text/javascript">window.ALL_CRATES=["{}"];</script>"##,
-                crate_name
-            )
-            .as_bytes(),
-        )
-        .into_owned();
-    let res = re_rewrite_src
-        .replace_all(&res, &b"href=\"/__DOCSERVER_SRCLINK"[..])
-        .into_owned();
-    let res = re_rewrite_root.replace_all(&res, &[][..]).into_owned();
-    let res = re_fix_root_path
-        .replace_all(&res, &b"data-root-path=\"./"[..])
-        .into_owned();
-    res
+        let re_fix_root_path = ByteRegex::new(r##"data-root-path="\.\./"##).unwrap();
+
+        Self {
+            re_remove_settings,
+            re_remove_hidden_src,
+            re_rewrite_src,
+            re_remove_cratesjs,
+            re_rewrite_root,
+            re_fix_root_path,
+            crate_name,
+        }
+    }
+
+    fn process_html_file(&self, src_path: &PathBuf, dest_path: &PathBuf) -> anyhow::Result<()> {
+        if src_path.extension().and_then(|s| s.to_str()) == Some("html") {
+            let data = fs::read(&src_path)?;
+
+            let res = self.re_remove_settings.replace_all(&data, &[][..]);
+            let res = self.re_remove_hidden_src.replace_all(&res, &[][..]);
+            let res = self.re_remove_cratesjs.replace_all(
+                &res,
+                format!(
+                    r##"<script type="text/javascript">window.ALL_CRATES=["{}"];</script>"##,
+                    self.crate_name
+                )
+                .as_bytes(),
+            );
+
+            let res = self
+                .re_rewrite_src
+                .replace_all(&res, &b"href=\"/__DOCSERVER_SRCLINK"[..]);
+            let res = self.re_rewrite_root.replace_all(&res, &[][..]);
+            let res = self
+                .re_fix_root_path
+                .replace_all(&res, &b"data-root-path=\"./"[..]);
+
+            fs::write(&dest_path, &res)?;
+        } else {
+            fs::rename(&src_path, &dest_path)?;
+        };
+
+        Ok(())
+    }
+
+    /// Helper function to copy and process a directory recursively
+    pub fn copy_and_process_dir(&self, src_dir: &Path, dest_dir: &Path) -> anyhow::Result<()> {
+        for entry in fs::read_dir(src_dir)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let file_name = entry.file_name();
+            let dest_path = dest_dir.join(&file_name);
+
+            if src_path.is_dir() {
+                // Skip directories that should be filtered
+                if should_include_file(&src_path) {
+                    fs::create_dir_all(&dest_path)?;
+                    self.copy_and_process_dir(&src_path, &dest_path)?;
+                }
+            } else {
+                // Skip files that should be filtered
+                if should_include_file(&src_path) {
+                    self.process_html_file(&src_path, &dest_path)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -153,39 +210,6 @@ pub struct BuildArgs {
 
     #[clap(flatten)]
     pub compression: CompressionArgs,
-}
-
-// Helper function to copy and process a directory recursively
-fn copy_and_process_dir(src_dir: &Path, dest_dir: &Path, crate_name: &str) -> anyhow::Result<()> {
-    for entry in fs::read_dir(src_dir)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let file_name = entry.file_name();
-        let dest_path = dest_dir.join(&file_name);
-
-        if src_path.is_dir() {
-            // Skip directories that should be filtered
-            if should_include_file(&src_path) {
-                fs::create_dir_all(&dest_path)?;
-                copy_and_process_dir(&src_path, &dest_path, crate_name)?;
-            }
-        } else {
-            // Skip files that should be filtered
-            if should_include_file(&src_path) {
-                let data = fs::read(&src_path)?;
-                let processed_data =
-                    if src_path.extension().and_then(|s| s.to_str()) == Some("html") {
-                        process_html_file(crate_name, data)
-                    } else {
-                        data
-                    };
-
-                fs::write(&dest_path, &processed_data)?;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
@@ -356,7 +380,8 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         fs::create_dir_all(&flavor_output_dir)?;
 
         // Copy and process the documentation files
-        copy_and_process_dir(&doc_crate_dir, &flavor_output_dir, crate_name)?;
+        FlavorProcessor::new(&crate_name)
+            .copy_and_process_dir(&doc_crate_dir, &flavor_output_dir)?;
 
         // Copy static files only once
         if let Some(static_path) = &args.output_static {
