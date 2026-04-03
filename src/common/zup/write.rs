@@ -38,6 +38,9 @@ pub fn pack(
 ) -> anyhow::Result<()> {
     let f = fs::File::create(output_path)?;
 
+    let mut hash_cache: HashMap<PathBuf, [u8; 32]> = HashMap::new();
+    let mut file_cache: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
+
     let level_dict = match compress {
         Some(compress) => {
             println!("Creating dictionary...");
@@ -62,7 +65,8 @@ pub fn pack(
             file_paths.shuffle(&mut rand::rng());
 
             // Start grabbing files, stop when we reach dict_train_size
-            let mut training_data = Vec::new();
+            let mut training_data = Vec::with_capacity(compress.dict_train_size);
+            let mut training_sizes = Vec::new();
             let mut total_len = 0;
             let mut hash_dedup = HashSet::<[u8; 32]>::new();
 
@@ -71,25 +75,26 @@ pub fn pack(
                     break;
                 }
 
-                let file_data = fs::read(&file_path)?;
+                let mut file_data = fs::read(&file_path)?;
                 let file_hash = hash(&file_data);
+
+                hash_cache.insert(file_path, file_hash);
                 if !hash_dedup.insert(file_hash) {
                     continue;
                 }
 
+                file_cache.insert(file_hash, file_data.clone());
+
                 total_len += file_data.len();
-                training_data.push(file_data);
+                training_sizes.push(file_data.len());
+                training_data.append(&mut file_data);
             }
 
-            let training_files: Vec<_> = training_data.iter().map(|f| f.as_slice()).collect();
-
-            let dict = if training_files.is_empty()
-                || training_data.iter().map(|f| f.len()).sum::<usize>() < 100
-            {
+            let dict = if training_data.len() < 100 {
                 // If we don't have enough training data, create an empty dictionary
                 Vec::new()
             } else {
-                zstd::dict::from_samples(&training_files, compress.dict_size)
+                zstd::dict::from_continuous(&training_data, &training_sizes, compress.dict_size)
                     .unwrap_or_else(|e| {
                         println!("Warning: Failed to create compression dictionary: {}. Using no dictionary.", e);
                         Vec::new()
@@ -112,6 +117,8 @@ pub fn pack(
         f,
         comp,
         offset: 0,
+        hash_cache,
+        file_cache,
         hash_dedup: HashMap::new(),
         stats: Stats::default(),
     };
@@ -126,6 +133,8 @@ pub fn pack(
 struct Writer<'d> {
     f: fs::File,
     hash_dedup: HashMap<[u8; 32], layout::Node>,
+    hash_cache: HashMap<PathBuf, [u8; 32]>,
+    file_cache: HashMap<[u8; 32], Vec<u8>>,
     offset: u64,
     comp: Option<WriterCompress<'d>>,
     stats: Stats,
@@ -170,7 +179,14 @@ impl<'d> Writer<'d> {
         } else {
             self.stats.total_files += 1;
 
-            let buf = fs::read(path)?;
+            let buf = if let Some(hash) = self.hash_cache.get(path)
+                && let Some(buf) = self.file_cache.get(hash)
+            {
+                buf.clone()
+            } else {
+                fs::read(path)?
+            };
+
             let res = self.write_node(&buf)?;
             Ok(res)
         }
