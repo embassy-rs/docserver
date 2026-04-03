@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use zstd::bulk::Compressor;
 
 use super::layout;
 
@@ -34,10 +35,10 @@ pub fn pack(
     input_dir: &Path,
     output_path: &Path,
     compress: Option<CompressConfig>,
-) -> io::Result<()> {
+) -> anyhow::Result<()> {
     let f = fs::File::create(output_path)?;
 
-    let comp = match compress {
+    let level_dict = match compress {
         Some(compress) => {
             println!("Creating dictionary...");
 
@@ -95,11 +96,13 @@ pub fn pack(
                     })
             };
 
-            Some(WriterCompress {
-                dict,
-                level: compress.level,
-            })
+            Some((compress.level, dict))
         }
+        None => None,
+    };
+
+    let comp = match &level_dict {
+        Some((level, dict)) => Some(WriterCompress::new(*level, &dict)?),
         None => None,
     };
 
@@ -120,20 +123,29 @@ pub fn pack(
     Ok(())
 }
 
-struct Writer {
+struct Writer<'d> {
     f: fs::File,
     hash_dedup: HashMap<[u8; 32], layout::Node>,
     offset: u64,
-    comp: Option<WriterCompress>,
+    comp: Option<WriterCompress<'d>>,
     stats: Stats,
 }
 
-struct WriterCompress {
-    dict: Vec<u8>,
-    level: i32,
+struct WriterCompress<'d> {
+    dict: &'d [u8],
+    comp: Compressor<'d>,
 }
 
-impl Writer {
+impl<'d> WriterCompress<'d> {
+    pub fn new(level: i32, dict: &'d [u8]) -> anyhow::Result<Self> {
+        Ok(Self {
+            dict,
+            comp: Compressor::with_dictionary(level, &dict)?,
+        })
+    }
+}
+
+impl<'d> Writer<'d> {
     fn write(&mut self, path: &Path) -> io::Result<layout::Node> {
         let m = fs::metadata(&path)?;
         if m.is_dir() {
@@ -181,17 +193,12 @@ impl Writer {
         self.stats.uncompressed_bytes_after_dedup += buf.len() as u64;
 
         let mut flags = 0;
-        if let Some(comp) = &mut self.comp {
-            if let Ok(mut compressor) =
-                zstd::bulk::Compressor::with_dictionary(comp.level, &comp.dict)
-            {
-                if let Ok(cdata) = compressor.compress(&buf) {
-                    if cdata.len() < buf.len() {
-                        buf = cdata.into();
-                        flags = layout::FLAG_COMPRESSED;
-                    }
-                }
-            }
+        if let Some(comp) = &mut self.comp
+            && let Ok(cdata) = comp.comp.compress(&buf)
+            && cdata.len() < buf.len()
+        {
+            buf = cdata.into();
+            flags = layout::FLAG_COMPRESSED;
         }
 
         self.stats.compressed_bytes_before_dedup += buf.len() as u64;
@@ -272,7 +279,7 @@ impl Writer {
 
     fn finish(mut self, root: layout::Node) -> io::Result<()> {
         let dict_range = match &self.comp {
-            Some(comp) => Some(self.write_data(&comp.dict.clone())?),
+            Some(comp) => Some(self.write_data(&comp.dict)?),
             None => None,
         };
 
