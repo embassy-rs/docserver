@@ -1,10 +1,12 @@
 use blake3;
 use rand::seq::SliceRandom;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::{self};
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use zstd::bulk::Compressor;
 
 use super::layout;
@@ -31,6 +33,54 @@ struct Stats {
     compressed_bytes_after_dedup: u64,
 }
 
+#[derive(Default)]
+struct FileCache {
+    hash_cache: HashMap<PathBuf, [u8; 32]>,
+    file_cache: HashMap<[u8; 32], Vec<u8>>,
+}
+
+impl FileCache {
+    pub fn insert(&mut self, file_path: PathBuf, buf: impl AsRef<[u8]>) -> bool {
+        let file_hash = hash(buf.as_ref());
+
+        self.hash_cache.insert(file_path, file_hash);
+
+        match self.file_cache.entry(file_hash) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(e) => {
+                e.insert(Vec::from(buf.as_ref()));
+
+                true
+            }
+        }
+    }
+
+    pub fn get(&self, file_path: &Path) -> Option<(&[u8], [u8; 32])> {
+        if let Some(hash) = self.hash_cache.get(file_path)
+            && let Some(buf) = self.file_cache.get(hash)
+        {
+            Some((buf.as_ref(), *hash))
+        } else {
+            None
+        }
+    }
+}
+
+struct SynchedFile {
+    f: fs::File,
+}
+
+impl Write for SynchedFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.f.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.f.flush()?;
+        self.f.sync_all()
+    }
+}
+
 pub fn pack(
     input_dir: &Path,
     output_path: &Path,
@@ -38,10 +88,9 @@ pub fn pack(
 ) -> anyhow::Result<()> {
     let f = fs::File::create(output_path)?;
 
-    let mut hash_cache: HashMap<PathBuf, [u8; 32]> = HashMap::new();
-    let mut file_cache: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
+    let mut file_cache = FileCache::default();
 
-    let level_dict = match compress {
+    let comp = match compress {
         Some(compress) => {
             println!("Creating dictionary...");
 
@@ -68,7 +117,6 @@ pub fn pack(
             let mut training_data = Vec::with_capacity(compress.dict_train_size);
             let mut training_sizes = Vec::new();
             let mut total_len = 0;
-            let mut hash_dedup = HashSet::<[u8; 32]>::new();
 
             for file_path in file_paths {
                 if total_len >= compress.dict_train_size {
@@ -76,14 +124,9 @@ pub fn pack(
                 }
 
                 let mut file_data = fs::read(&file_path)?;
-                let file_hash = hash(&file_data);
-
-                hash_cache.insert(file_path, file_hash);
-                if !hash_dedup.insert(file_hash) {
+                if !file_cache.insert(file_path, &file_data) {
                     continue;
                 }
-
-                file_cache.insert(file_hash, file_data.clone());
 
                 total_len += file_data.len();
                 training_sizes.push(file_data.len());
@@ -101,61 +144,59 @@ pub fn pack(
                     })
             };
 
-            Some((compress.level, dict))
+            Some(WriterCompress::from_dict(compress.level, dict)?)
         }
-        None => None,
-    };
-
-    let comp = match &level_dict {
-        Some((level, dict)) => Some(WriterCompress::new(*level, &dict)?),
         None => None,
     };
 
     // Write stuff
     println!("Packing...");
+
+    let start = Instant::now();
     let mut w = Writer {
-        f,
+        f: BufWriter::new(SynchedFile { f }),
         comp,
         offset: 0,
-        hash_cache,
-        file_cache,
         hash_dedup: HashMap::new(),
         stats: Stats::default(),
     };
 
-    let root = w.write(input_dir)?;
+    let root = w.write(input_dir, &file_cache)?;
+
+    println!("Time elapsed: {:?}", start.elapsed());
     w.print_stats();
     w.finish(root)?;
 
     Ok(())
 }
 
-struct Writer<'d> {
-    f: fs::File,
+struct Writer {
+    f: BufWriter<SynchedFile>,
     hash_dedup: HashMap<[u8; 32], layout::Node>,
-    hash_cache: HashMap<PathBuf, [u8; 32]>,
-    file_cache: HashMap<[u8; 32], Vec<u8>>,
     offset: u64,
-    comp: Option<WriterCompress<'d>>,
+    comp: Option<WriterCompress>,
     stats: Stats,
 }
 
-struct WriterCompress<'d> {
-    dict: &'d [u8],
-    comp: Compressor<'d>,
+struct WriterCompress {
+    dict: Vec<u8>,
+    comp: Compressor<'static>,
 }
 
-impl<'d> WriterCompress<'d> {
-    pub fn new(level: i32, dict: &'d [u8]) -> anyhow::Result<Self> {
-        Ok(Self {
-            dict,
-            comp: Compressor::with_dictionary(level, &dict)?,
-        })
+impl WriterCompress {
+    pub fn from_dict(level: i32, dict: Vec<u8>) -> io::Result<Self> {
+        let comp = Compressor::with_dictionary(level, &dict)?;
+
+        Ok(Self { dict, comp })
+    }
+
+    pub fn compress(&mut self, data: &[u8]) -> Result<Vec<u8>, io::Error> {
+        self.comp.compress(data)
     }
 }
 
-impl<'d> Writer<'d> {
-    fn write(&mut self, path: &Path) -> io::Result<layout::Node> {
+impl Writer {
+    fn write(&mut self, path: &Path, cache: &FileCache) -> io::Result<layout::Node> {
         let m = fs::metadata(&path)?;
         if m.is_dir() {
             self.stats.total_dirs += 1;
@@ -165,40 +206,42 @@ impl<'d> Writer<'d> {
 
             let mut buf = Vec::new();
             for entry in readdir {
-                let node = self.write(&entry.path())?;
-
+                let node = self.write(&entry.path(), cache)?;
                 let name = entry.file_name().to_string_lossy().to_string();
+
                 buf.push(name.len().try_into().unwrap());
                 buf.extend_from_slice(name.as_bytes());
                 buf.extend_from_slice(&node.to_bytes());
             }
 
-            let mut res = self.write_node(&buf)?;
+            let mut res = self.write_node(&buf, None)?;
             res.flags |= layout::FLAG_DIR;
             Ok(res)
         } else {
             self.stats.total_files += 1;
 
-            let buf = if let Some(hash) = self.hash_cache.get(path)
-                && let Some(buf) = self.file_cache.get(hash)
-            {
-                buf.clone()
+            let (buf, cached_hash) = if let Some((buf, cached_hash)) = cache.get(&path) {
+                (Cow::from(buf), Some(cached_hash))
             } else {
-                fs::read(path)?
+                (Cow::from(fs::read(path)?), None)
             };
 
-            let res = self.write_node(&buf)?;
+            let res = self.write_node(&buf, cached_hash)?;
             Ok(res)
         }
     }
 
-    fn write_node(&mut self, buf: impl AsRef<[u8]>) -> io::Result<layout::Node> {
+    fn write_node(
+        &mut self,
+        buf: impl AsRef<[u8]>,
+        cached_hash: Option<[u8; 32]>,
+    ) -> io::Result<layout::Node> {
         let mut buf: Cow<[u8]> = Cow::Borrowed(buf.as_ref());
         // Track stats before dedup
         self.stats.nodes_before_dedup += 1;
         self.stats.uncompressed_bytes_before_dedup += buf.len() as u64;
 
-        let hash = hash(&buf);
+        let hash = cached_hash.unwrap_or(hash(&buf));
         if let Some(res) = self.hash_dedup.get(&hash) {
             self.stats.compressed_bytes_before_dedup += res.range.len;
             return Ok(*res);
@@ -210,7 +253,7 @@ impl<'d> Writer<'d> {
 
         let mut flags = 0;
         if let Some(comp) = &mut self.comp
-            && let Ok(cdata) = comp.comp.compress(&buf)
+            && let Ok(cdata) = comp.compress(&buf)
             && cdata.len() < buf.len()
         {
             buf = cdata.into();
@@ -295,7 +338,7 @@ impl<'d> Writer<'d> {
 
     fn finish(mut self, root: layout::Node) -> io::Result<()> {
         let dict_range = match &self.comp {
-            Some(comp) => Some(self.write_data(&comp.dict)?),
+            Some(comp) => Some(self.write_data(&comp.dict.clone())?),
             None => None,
         };
 
@@ -307,7 +350,7 @@ impl<'d> Writer<'d> {
         };
 
         self.f.write_all(&superblock.to_bytes())?;
-        self.f.sync_all()?;
+        self.f.flush()?;
         Ok(())
     }
 }
