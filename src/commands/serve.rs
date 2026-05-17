@@ -89,7 +89,18 @@ impl Thing {
                 res.push(name.to_string())
             }
         }
-        res.sort_by(|a, b| b.cmp(a)); // reverse
+        res.sort_by(|a, b| {
+            match (a.as_str(), b.as_str()) {
+                ("git", "git") => std::cmp::Ordering::Equal,
+                ("git", _) => std::cmp::Ordering::Less,
+                (_, "git") => std::cmp::Ordering::Greater,
+                _ => {
+                    let av = semver::Version::parse(a).ok();
+                    let bv = semver::Version::parse(b).ok();
+                    bv.cmp(&av)
+                }
+            }
+        });
         Ok(res)
     }
 
