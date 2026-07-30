@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
@@ -88,7 +89,10 @@ impl FlavorProcessor {
                 .re_fix_root_path
                 .replace_all(&res, &b"data-root-path=\"./"[..]);
 
-            fs::write(&dest_path, &res)?;
+            match res {
+                Cow::Owned(ref res) => fs::write(&dest_path, res)?,
+                Cow::Borrowed(_) => fs::rename(&src_path, &dest_path)?,
+            };
         } else {
             fs::rename(&src_path, &dest_path)?;
         };
