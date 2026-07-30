@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zstd::bulk::Compressor;
 
+use crate::common::file::{FileData, read_file_via_mmap};
+
 use super::layout;
 
 fn hash(data: &[u8]) -> [u8; 32] {
@@ -32,20 +34,6 @@ struct Stats {
     compressed_bytes_after_dedup: u64,
 }
 
-enum FileData {
-    Vec(Vec<u8>),
-    Mmap(memmap2::Mmap),
-}
-
-impl AsRef<[u8]> for FileData {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            FileData::Vec(v) => v.as_slice(),
-            FileData::Mmap(m) => m.as_ref(),
-        }
-    }
-}
-
 #[derive(Default)]
 struct FileCache {
     hash_cache: HashMap<PathBuf, [u8; 32]>,
@@ -58,20 +46,6 @@ impl FileCache {
         let buf = self.file_cache.get(hash)?;
         Some((buf.as_ref(), *hash))
     }
-}
-
-/// Attempt to memory-map a file read-only.
-/// Falls back to a regular read on failure or on platforms without mmap support.
-fn read_file_via_mmap(path: &Path) -> io::Result<memmap2::Mmap> {
-    let file = fs::File::open(path)?;
-    // SAFETY: mmap is safe as long as the file is not truncated concurrently.
-    // For a packer reading a static tree this is a reasonable assumption.
-    let mmap = unsafe { memmap2::Mmap::map(&file) }?;
-
-    #[cfg(unix)]
-    let _ = mmap.advise(memmap2::Advice::Sequential);
-
-    Ok(mmap)
 }
 
 pub fn pack(
@@ -100,17 +74,8 @@ pub fn pack(
                     break;
                 }
 
-                // Try mmap first (avoids a copy if the file turns out to be a
-                // duplicate), but we still need a Vec for the training buffer
-                // if the file is unique.
-                let (file_hash, file_data) = if let Ok(mmap) = read_file_via_mmap(&file_path) {
-                    let h = hash(&mmap);
-                    (h, FileData::Mmap(mmap))
-                } else {
-                    let buf = fs::read(&file_path)?;
-                    let h = hash(&buf);
-                    (h, FileData::Vec(buf))
-                };
+                let file_data = unsafe { read_file_via_mmap(&file_path)? };
+                let file_hash = hash(file_data.as_ref());
 
                 match file_cache.file_cache.entry(file_hash) {
                     Entry::Occupied(_) => continue,
@@ -174,21 +139,13 @@ fn collect_file_paths(input_dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut stack = vec![input_dir.to_path_buf()];
 
     while let Some(current_path) = stack.pop() {
-        let entries = match fs::read_dir(&current_path) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        for entry in entries.flatten() {
-            let ft = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
-
+        for entry in fs::read_dir(&current_path)?.flatten() {
             let path = entry.path();
-            if ft.is_dir() {
+            let file_type = entry.file_type()?;
+
+            if file_type.is_dir() {
                 stack.push(path);
-            } else if ft.is_file() {
+            } else if file_type.is_file() {
                 file_paths.push(path);
             }
         }
@@ -249,11 +206,11 @@ impl Writer {
             if let Some((buf, cached_hash)) = cache.get(&path) {
                 self.write_node(buf, Some(cached_hash))
             } else if m.len() > 4096
-                && let Ok(mmap) = read_file_via_mmap(path)
+                && let Ok(file_data) = unsafe { read_file_via_mmap(path) }
             {
                 // For files larger than 4 KiB, try mmap to avoid a kernel copy
                 // and a heap allocation. Fall back to fs::read on failure.
-                self.write_node(&mmap, None)
+                self.write_node(file_data.as_ref(), None)
             } else {
                 let buf = fs::read(path)?;
 

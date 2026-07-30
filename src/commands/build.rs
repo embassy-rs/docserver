@@ -11,6 +11,7 @@ use regex::bytes::Regex as ByteRegex;
 use regex::{Regex, bytes};
 
 use crate::common::CompressionArgs;
+use crate::common::file::read_file_via_mmap;
 use crate::common::manifest;
 use crate::common::zup::write::pack;
 
@@ -68,9 +69,9 @@ impl FlavorProcessor {
 
     fn process_html_file(&self, src_path: &PathBuf, dest_path: &PathBuf) -> anyhow::Result<()> {
         if src_path.extension().and_then(|s| s.to_str()) == Some("html") {
-            let data = fs::read(&src_path)?;
+            let data = unsafe { read_file_via_mmap(&src_path)? };
 
-            let res = self.re_remove_settings.replace_all(&data, &[][..]);
+            let res = self.re_remove_settings.replace_all(data.as_ref(), &[][..]);
             let res = self.re_remove_hidden_src.replace_all(&res, &[][..]);
             let res = self.re_remove_cratesjs.replace_all(
                 &res,
@@ -91,7 +92,11 @@ impl FlavorProcessor {
 
             match res {
                 Cow::Owned(ref res) => fs::write(&dest_path, res)?,
-                Cow::Borrowed(_) => fs::rename(&src_path, &dest_path)?,
+                Cow::Borrowed(_) => {
+                    drop(data); // Drop must occur before modifying file
+
+                    fs::rename(&src_path, &dest_path)?;
+                }
             };
         } else {
             fs::rename(&src_path, &dest_path)?;
@@ -107,14 +112,15 @@ impl FlavorProcessor {
             let src_path = entry.path();
             let file_name = entry.file_name();
             let dest_path = dest_dir.join(&file_name);
+            let file_type = entry.file_type()?;
 
-            if src_path.is_dir() {
+            if file_type.is_dir() {
                 // Skip directories that should be filtered
                 if should_include_file(&src_path) {
                     fs::create_dir_all(&dest_path)?;
                     self.copy_and_process_dir(&src_path, &dest_path)?;
                 }
-            } else {
+            } else if file_type.is_file() {
                 // Skip files that should be filtered
                 if should_include_file(&src_path) {
                     self.process_html_file(&src_path, &dest_path)?;
