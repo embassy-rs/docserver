@@ -89,16 +89,14 @@ impl Thing {
                 res.push(name.to_string())
             }
         }
-        res.sort_by(|a, b| {
-            match (a.as_str(), b.as_str()) {
-                ("git", "git") => std::cmp::Ordering::Equal,
-                ("git", _) => std::cmp::Ordering::Less,
-                (_, "git") => std::cmp::Ordering::Greater,
-                _ => {
-                    let av = semver::Version::parse(a).ok();
-                    let bv = semver::Version::parse(b).ok();
-                    bv.cmp(&av)
-                }
+        res.sort_by(|a, b| match (a.as_str(), b.as_str()) {
+            ("git", "git") => std::cmp::Ordering::Equal,
+            ("git", _) => std::cmp::Ordering::Less,
+            (_, "git") => std::cmp::Ordering::Greater,
+            _ => {
+                let av = semver::Version::parse(a).ok();
+                let bv = semver::Version::parse(b).ok();
+                bv.cmp(&av)
             }
         });
         Ok(res)
@@ -341,7 +339,7 @@ impl Thing {
                                 s.push('/');
                                 s
                             })
-                        ))
+                        ));
                     }
                     x => x?,
                 };
@@ -481,7 +479,8 @@ pub struct ServeArgs {
 }
 
 pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
-    let templates = Tera::new("templates/**/*.html").unwrap();
+    let mut templates = Tera::default();
+    templates.load_from_glob("templates/**/*.html").unwrap();
 
     let webroot: PathBuf = args.webroot.unwrap_or_else(|| {
         env::var_os("DOCSERVER_WEBROOT")
