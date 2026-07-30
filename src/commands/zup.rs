@@ -2,8 +2,8 @@ use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::common::zup::write::pack;
 use crate::common::CompressionArgs;
+use crate::common::zup::write::pack;
 
 #[derive(Parser)]
 pub struct ZupArgs {
