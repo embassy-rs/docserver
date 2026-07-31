@@ -14,12 +14,12 @@ use zstd::dict::DecoderDictionary;
 use super::layout;
 
 #[cfg(target_os = "linux")]
-fn read_exact_at(file: &fs::File, buffer: &mut Vec<u8>, offset: u64) -> io::Result<()> {
+fn read_exact_at(file: &fs::File, buffer: &mut [u8], offset: u64) -> io::Result<()> {
     file.read_exact_at(buffer, offset)
 }
 
 #[cfg(target_os = "windows")]
-fn read_exact_at(mut file: &fs::File, buffer: &mut Vec<u8>, offset: u64) -> io::Result<()> {
+fn read_exact_at(mut file: &fs::File, buffer: &mut [u8], offset: u64) -> io::Result<()> {
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(buffer)
 }
@@ -65,7 +65,7 @@ impl Reader {
         }
 
         let mut buffer = vec![0u8; r.len as usize];
-        read_exact_at(&file, &mut buffer, r.offset)?;
+        read_exact_at(file, &mut buffer, r.offset)?;
         Ok(buffer)
     }
 
@@ -124,12 +124,10 @@ impl Reader {
 
     pub fn read(&self, path: &[&str]) -> io::Result<Vec<u8>> {
         match self.open(path)? {
-            Node::Directory(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::IsADirectory,
-                    format!("is a directory, not a file: {}", path.join("/")),
-                ));
-            }
+            Node::Directory(_) => Err(io::Error::new(
+                io::ErrorKind::IsADirectory,
+                format!("is a directory, not a file: {}", path.join("/")),
+            )),
             Node::File(f) => f.read(),
         }
     }

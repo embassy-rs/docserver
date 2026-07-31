@@ -28,7 +28,7 @@ pub struct CompressionArgs {
 impl CompressionArgs {
     /// Convert to CompressConfig if compression is enabled
     pub fn to_config(&self) -> Option<crate::common::zup::write::CompressConfig> {
-        (!self.no_compress).then(|| crate::common::zup::write::CompressConfig {
+        (!self.no_compress).then_some(crate::common::zup::write::CompressConfig {
             level: self.compress_level,
             dict_size: self.dict_size,
             dict_train_size: self.dict_train_size,

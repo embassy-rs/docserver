@@ -55,7 +55,7 @@ impl Thing {
         self.path.join("crates")
     }
     fn crate_path(&self, krate: &str) -> PathBuf {
-        self.path.join("crates").join(&krate)
+        self.path.join("crates").join(krate)
     }
 
     fn crate_zup(&self, krate: &str, version: &str) -> io::Result<Reader> {
@@ -156,7 +156,7 @@ impl Thing {
 
         let mut resp = Response::new(Body::from(data));
         let h = resp.headers_mut();
-        h.insert("Content-Type", HeaderValue::from_static(mime.into()));
+        h.insert("Content-Type", HeaderValue::from_static(mime));
         h.insert(
             "Cache-Control",
             HeaderValue::from_static("max-age=31536000"),
@@ -187,8 +187,8 @@ impl Thing {
 
         // Crate
         let krates = self.list_crates()?;
-        if krate == None {
-            krate = cookies.get(&"crate".to_string()).map(|s| s.as_str());
+        if krate.is_none() {
+            krate = cookies.get("crate").map(|s| s.as_str());
         }
         let mut krate = krate.unwrap_or("embassy-executor");
         if krates.iter().find(|s| *s == krate).is_none() {
@@ -197,7 +197,7 @@ impl Thing {
 
         // Version
         let versions = self.list_versions(krate)?;
-        if version == None {
+        if version.is_none() {
             version = cookies
                 .get(&format!("crate-{}-version", krate))
                 .map(|s| s.as_str());
@@ -230,7 +230,7 @@ impl Thing {
             return self.resp_405();
         }
 
-        let raw_path = &req.uri().path()[..];
+        let raw_path = req.uri().path();
         let mut path = Vec::new();
         for x in raw_path.split('/') {
             match x {
@@ -242,12 +242,12 @@ impl Thing {
             }
         }
 
-        match &path[..] {
+        match path[..] {
             // Serve static file
-            &["static", ref path @ ..] => self.serve_static(&path.join("/")).await,
+            ["static", ref path @ ..] => self.serve_static(&path.join("/")).await,
 
             // JSON API endpoints
-            &["api", "crates"] => {
+            ["api", "crates"] => {
                 let crates = self.list_crates()?;
                 let crates: Vec<_> = crates
                     .iter()
@@ -259,7 +259,7 @@ impl Thing {
                     .insert("Content-Type", HeaderValue::from_static("application/json"));
                 Ok(resp)
             }
-            &["api", "crates", krate, "versions"] => {
+            ["api", "crates", krate, "versions"] => {
                 let versions = match self.list_versions(krate) {
                     Ok(v) => v,
                     Err(e) if e.kind() == ErrorKind::NotFound => return self.resp_404(),
@@ -276,19 +276,19 @@ impl Thing {
                 Ok(resp)
             }
 
-            &[] => self.guess_redirect(&req, None, None).await,
-            &[krate] => self.guess_redirect(&req, Some(krate), None).await,
-            &[krate, version] => self.guess_redirect(&req, Some(krate), Some(version)).await,
+            [] => self.guess_redirect(&req, None, None).await,
+            [krate] => self.guess_redirect(&req, Some(krate), None).await,
+            [krate, version] => self.guess_redirect(&req, Some(krate), Some(version)).await,
 
             // Get file from crate version+flavor
-            &[krate, version, flavor, ..] => {
+            [krate, version, flavor, ..] => {
                 let zup = match self.crate_zup(krate, version) {
                     Err(e) if e.kind() == ErrorKind::NotFound => return self.resp_404(),
                     x => x?,
                 };
 
                 // redirect remove extra crate name in path.
-                if path.len() > 3 && path[3] == &krate.replace('-', "_") {
+                if path.len() > 3 && path[3] == krate.replace('-', "_") {
                     return self.resp_redirect(&format!(
                         "/{}/{}/{}/{}",
                         krate,

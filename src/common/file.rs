@@ -17,7 +17,7 @@ impl FileData {
     }
 
     #[inline]
-    pub fn to_vec(self) -> Self {
+    pub fn into_vec(self) -> Self {
         Self::Vec(match self {
             Self::Vec(vec) => vec,
             Self::Mmap(mmap) => mmap.as_ref().to_vec(),

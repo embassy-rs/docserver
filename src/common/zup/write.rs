@@ -91,7 +91,7 @@ pub fn pack(
                         }
 
                         if file_data.is_mapped() && vma_count > 25_000 {
-                            e.insert(file_data.to_vec());
+                            e.insert(file_data.into_vec());
                         } else {
                             e.insert(file_data);
                         }
@@ -190,12 +190,12 @@ impl WriterCompress {
 
 impl Writer {
     fn write(&mut self, path: &Path, cache: &FileCache) -> io::Result<layout::Node> {
-        let m = fs::metadata(&path)?;
+        let m = fs::metadata(path)?;
         if m.is_dir() {
             self.stats.total_dirs += 1;
 
-            let mut readdir: Vec<_> = fs::read_dir(&path)?.collect::<Result<Vec<_>, _>>()?;
-            readdir.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+            let mut readdir: Vec<_> = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+            readdir.sort_by_key(|a| a.file_name());
 
             let mut buf = Vec::with_capacity(readdir.len() * 48);
             for entry in readdir {
@@ -213,7 +213,7 @@ impl Writer {
         } else {
             self.stats.total_files += 1;
 
-            if let Some((buf, cached_hash)) = cache.get(&path) {
+            if let Some((buf, cached_hash)) = cache.get(path) {
                 self.write_node(buf, Some(cached_hash))
             } else {
                 let file_data = unsafe { mmap_file(path, &m)? };

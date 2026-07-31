@@ -67,7 +67,7 @@ async fn fetch_crate_versions(crate_name: &str) -> Result<Vec<String>> {
     let url = format!("https://crates.io/api/v1/crates/{}", crate_name);
 
     let mut cmd = Command::new("curl");
-    cmd.args(&["-s", "-f", &url]);
+    cmd.args(["-s", "-f", &url]);
 
     let output = cmd.output().context("Failed to execute curl command")?;
 
@@ -106,7 +106,7 @@ async fn fetch_server_versions(server_url: &str, crate_name: &str) -> Result<Vec
     let url = format!("{}/api/crates/{}/versions", server_url, crate_name);
 
     let mut cmd = Command::new("curl");
-    cmd.args(&["-s", "-f", &url]);
+    cmd.args(["-s", "-f", &url]);
 
     let output = cmd.output().context("Failed to execute curl command")?;
 
@@ -184,7 +184,7 @@ async fn build_single_version(
     println!("Downloading from: {}", download_url);
 
     let mut cmd = Command::new("curl");
-    cmd.args(&[
+    cmd.args([
         "-L", // Follow redirects
         "-f", // Fail on HTTP error codes
         "-o",
@@ -206,7 +206,7 @@ async fn build_single_version(
 
     // Extract the crate (it's a .tar.gz file despite the .crate extension)
     let mut cmd = Command::new("tar");
-    cmd.args(&[
+    cmd.args([
         "-xzf",
         crate_path.to_str().unwrap(),
         "-C",
