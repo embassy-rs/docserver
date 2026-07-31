@@ -5,6 +5,7 @@
 //!   from `ntdll.dll` via the `windows` crate.
 
 use std::fmt;
+#[cfg(windows)]
 use std::io;
 
 use std::sync::Arc;
@@ -47,6 +48,7 @@ impl Default for MonitorConfig {
 pub struct MemoryMonitor {
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    pid: u32,
 }
 
 impl MemoryMonitor {
@@ -60,6 +62,8 @@ impl MemoryMonitor {
 
         // Validate early so we fail fast instead of failing inside the thread.
         let _ = ProcessHandle::new(pid)?;
+
+        println!("[mon:{}] started", pid);
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = Arc::clone(&shutdown);
@@ -122,6 +126,7 @@ impl MemoryMonitor {
         Ok(MemoryMonitor {
             shutdown,
             thread: Some(thread),
+            pid,
         })
     }
 }
@@ -133,12 +138,15 @@ impl Drop for MemoryMonitor {
             t.thread().unpark(); // wake the thread immediately
             let _ = t.join();
         }
+
+        println!("[mon:{}] stopped", self.pid);
     }
 }
 
 #[derive(Debug)]
 pub enum ProcessError {
     InvalidPid(u32),
+    #[cfg(windows)]
     Io(io::Error),
     #[cfg(unix)]
     Nix(nix::Error),
@@ -152,6 +160,7 @@ impl fmt::Display for ProcessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProcessError::InvalidPid(pid) => write!(f, "invalid PID: {}", pid),
+            #[cfg(windows)]
             ProcessError::Io(e) => write!(f, "io error: {}", e),
             #[cfg(unix)]
             ProcessError::Nix(e) => write!(f, "nix error: {}", e),
