@@ -2,8 +2,10 @@ use blake3;
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::fs::{self};
-use std::io::{self, BufWriter, Write};
+use std::ffi::OsString;
+use std::fs;
+use std::io;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zstd::bulk::Compressor;
@@ -48,12 +50,76 @@ impl FileCache {
     }
 }
 
+// ---------------------------------------------------------------------------
+// In-memory filesystem tree – built once, queried zero times after.
+// ---------------------------------------------------------------------------
+
+enum FsNode {
+    Dir {
+        children: Vec<(OsString, FsNode)>,
+    },
+    File {
+        path: PathBuf,
+        metadata: fs::Metadata,
+    },
+}
+
+/// Walk the filesystem once, capturing the full tree and all file metadata.
+/// Directory children are sorted immediately so we never need to re-read.
+fn build_tree(path: PathBuf) -> io::Result<FsNode> {
+    let metadata = fs::metadata(&path)?;
+    if metadata.is_dir() {
+        let mut children = Vec::new();
+        for entry in fs::read_dir(&path)?.flatten() {
+            let file_type = entry.file_type()?;
+            let name = entry.file_name();
+            let child_path = entry.path();
+
+            if file_type.is_dir() {
+                let child = build_tree(child_path)?;
+                children.push((name, child));
+            } else if file_type.is_file() {
+                let metadata = entry.metadata()?;
+                children.push((
+                    name,
+                    FsNode::File {
+                        path: child_path,
+                        metadata,
+                    },
+                ));
+            }
+            // Symlinks and other types are skipped, matching original behaviour.
+        }
+        children.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(FsNode::Dir { children })
+    } else {
+        Ok(FsNode::File { path, metadata })
+    }
+}
+
+/// Gather references to every file node for dictionary training.
+fn collect_file_nodes<'a>(node: &'a FsNode, files: &mut Vec<&'a FsNode>) {
+    match node {
+        FsNode::Dir { children, .. } => {
+            for (_, child) in children {
+                collect_file_nodes(child, files);
+            }
+        }
+        FsNode::File { .. } => files.push(node),
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 pub fn pack(
     input_dir: &Path,
     output_path: &Path,
     compress: Option<CompressConfig>,
 ) -> anyhow::Result<()> {
     let f = fs::File::create(output_path)?;
+
+    // Build the tree once. Everything below uses this in-memory structure.
+    let tree = build_tree(input_dir.to_path_buf())?;
 
     let mut file_cache = FileCache::default();
     let mut vma_count: u32 = 0;
@@ -62,38 +128,41 @@ pub fn pack(
         Some(compress) => {
             println!("Creating dictionary...");
 
-            let mut file_paths = collect_file_paths(input_dir)?;
-            file_paths.shuffle(&mut rand::rng());
+            let mut file_nodes = Vec::new();
+            collect_file_nodes(&tree, &mut file_nodes);
+            file_nodes.shuffle(&mut rand::rng());
 
             // Start grabbing files, stop when we reach dict_train_size
             let mut training_data = Vec::with_capacity(compress.dict_train_size);
             let mut training_sizes = Vec::new();
             let mut total_len = 0;
 
-            for file_path in file_paths {
+            for file_node in file_nodes {
                 if total_len >= compress.dict_train_size {
                     break;
                 }
 
-                let file_data = unsafe { mmap_file(&file_path, &fs::metadata(&file_path)?)? };
-                let file_hash = hash(file_data.as_ref());
+                if let FsNode::File { path, metadata } = file_node {
+                    let file_data = unsafe { mmap_file(path, metadata)? };
+                    let file_hash = hash(file_data.as_ref());
 
-                match file_cache.file_cache.entry(file_hash) {
-                    Entry::Occupied(_) => continue,
-                    Entry::Vacant(e) => {
-                        total_len += file_data.as_ref().len();
-                        training_sizes.push(file_data.as_ref().len());
-                        training_data.extend_from_slice(file_data.as_ref());
-                        file_cache.hash_cache.insert(file_path, file_hash);
+                    match file_cache.file_cache.entry(file_hash) {
+                        Entry::Occupied(_) => continue,
+                        Entry::Vacant(e) => {
+                            total_len += file_data.as_ref().len();
+                            training_sizes.push(file_data.as_ref().len());
+                            training_data.extend_from_slice(file_data.as_ref());
+                            file_cache.hash_cache.insert(path.clone(), file_hash);
 
-                        if file_data.is_mapped() {
-                            vma_count += 1;
-                        }
+                            if file_data.is_mapped() {
+                                vma_count += 1;
+                            }
 
-                        if file_data.is_mapped() && vma_count > 25_000 {
-                            e.insert(file_data.into_vec());
-                        } else {
-                            e.insert(file_data);
+                            if file_data.is_mapped() && vma_count > 25_000 {
+                                e.insert(file_data.into_vec());
+                            } else {
+                                e.insert(file_data);
+                            }
                         }
                     }
                 }
@@ -132,7 +201,7 @@ pub fn pack(
         stats: Stats::default(),
     };
 
-    let root = w.write(input_dir, &file_cache)?;
+    let root = w.write_tree(&tree, &file_cache)?;
 
     println!("Time elapsed: {:?}", start.elapsed());
     w.print_stats();
@@ -141,27 +210,6 @@ pub fn pack(
     file.sync_all()?;
 
     Ok(())
-}
-
-/// Collect paths using cached file_type() instead of extra stat() syscalls.
-fn collect_file_paths(input_dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut file_paths = Vec::new();
-    let mut stack = vec![input_dir.to_path_buf()];
-
-    while let Some(current_path) = stack.pop() {
-        for entry in fs::read_dir(&current_path)?.flatten() {
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file() {
-                file_paths.push(path);
-            }
-        }
-    }
-
-    Ok(file_paths)
 }
 
 struct Writer {
@@ -189,38 +237,35 @@ impl WriterCompress {
 }
 
 impl Writer {
-    fn write(&mut self, path: &Path, cache: &FileCache) -> io::Result<layout::Node> {
-        let m = fs::metadata(path)?;
-        if m.is_dir() {
-            self.stats.total_dirs += 1;
+    /// Recursively write the in-memory tree. No OS calls.
+    fn write_tree(&mut self, node: &FsNode, cache: &FileCache) -> io::Result<layout::Node> {
+        match node {
+            FsNode::Dir { children, .. } => {
+                self.stats.total_dirs += 1;
 
-            let mut readdir: Vec<_> = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
-            readdir.sort_by_key(|a| a.file_name());
+                let mut buf = Vec::with_capacity(children.len() * 48);
+                for (name, child) in children {
+                    let node = self.write_tree(child, cache)?;
+                    let name = name.to_string_lossy().to_string();
 
-            let mut buf = Vec::with_capacity(readdir.len() * 48);
-            for entry in readdir {
-                let node = self.write(&entry.path(), cache)?;
-                let name = entry.file_name().to_string_lossy().to_string();
+                    buf.push(name.len().try_into().unwrap());
+                    buf.extend_from_slice(name.as_bytes());
+                    buf.extend_from_slice(&node.to_bytes());
+                }
 
-                buf.push(name.len().try_into().unwrap());
-                buf.extend_from_slice(name.as_bytes());
-                buf.extend_from_slice(&node.to_bytes());
+                let mut res = self.write_node(&buf, None)?;
+                res.flags |= layout::FLAG_DIR;
+                Ok(res)
             }
+            FsNode::File { path, metadata } => {
+                self.stats.total_files += 1;
 
-            let mut res = self.write_node(&buf, None)?;
-            res.flags |= layout::FLAG_DIR;
-            Ok(res)
-        } else {
-            self.stats.total_files += 1;
-
-            if let Some((buf, cached_hash)) = cache.get(path) {
-                self.write_node(buf, Some(cached_hash))
-            } else {
-                let file_data = unsafe { mmap_file(path, &m)? };
-
-                // For files larger than 4 KiB, try mmap to avoid a kernel copy
-                // and a heap allocation. Fall back to fs::read on failure.
-                self.write_node(file_data.as_ref(), None)
+                if let Some((buf, cached_hash)) = cache.get(path) {
+                    self.write_node(buf, Some(cached_hash))
+                } else {
+                    let file_data = unsafe { mmap_file(path, metadata)? };
+                    self.write_node(file_data.as_ref(), None)
+                }
             }
         }
     }
