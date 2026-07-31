@@ -1,8 +1,8 @@
-//! Cross-platform pause/resume for external processes.
+//! Cross-platform pause/resume/kill for external processes.
 //!
-//! * **Unix** – `nix::sys::signal::kill` with `SIGSTOP` / `SIGCONT`.
+//! * **Unix** – `nix::sys::signal::kill` with `SIGSTOP` / `SIGCONT` / `SIGKILL`.
 //! * **Windows** – `NtSuspendProcess` / `NtResumeProcess` loaded at runtime
-//!   from `ntdll.dll` via the `windows` crate.
+//!   from `ntdll.dll` via the `windows` crate; `TerminateProcess` for kill.
 
 use std::fmt;
 #[cfg(windows)]
@@ -11,7 +11,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sysinfo::System;
 
 /// Configuration for memory-based process control.
@@ -23,6 +23,9 @@ pub struct MonitorConfig {
     pub resume_threshold: f64,
     /// How often to poll system memory.
     pub poll_interval: Duration,
+    /// Maximum duration a process may remain paused before it is killed.
+    /// `None` means the process will never be killed by the monitor.
+    pub max_pause_duration: Option<Duration>,
 }
 
 impl Default for MonitorConfig {
@@ -31,6 +34,7 @@ impl Default for MonitorConfig {
             pause_threshold: 92.5,
             resume_threshold: 90.0,
             poll_interval: Duration::from_millis(250),
+            max_pause_duration: Some(Duration::from_secs(600)), // 10 minutes default
         }
     }
 }
@@ -40,6 +44,9 @@ impl Default for MonitorConfig {
 /// The monitor owns a background thread that polls memory usage. When
 /// memory crosses `pause_threshold` the subprocess is frozen; when it drops
 /// below `resume_threshold` the subprocess is resumed.
+///
+/// If `max_pause_duration` is set and the process remains paused longer
+/// than that duration, the process is killed and monitoring stops.
 ///
 /// The monitor automatically cleans up its thread when dropped or when
 /// `stop()` is called. If the subprocess is paused when monitoring ends,
@@ -79,8 +86,10 @@ impl MemoryMonitor {
 
             let mut sys = System::new_all();
             let mut local_paused = false;
+            let mut paused_since: Option<Instant> = None;
+            let mut killed = false;
 
-            while !shutdown_clone.load(Ordering::Relaxed) {
+            while !shutdown_clone.load(Ordering::Relaxed) && !killed {
                 sys.refresh_memory();
 
                 let total = sys.total_memory() as f64;
@@ -94,20 +103,44 @@ impl MemoryMonitor {
                     match proc.pause() {
                         Ok(()) => {
                             local_paused = true;
+                            paused_since = Some(Instant::now());
                             println!("[mon:{}] memory {:.1}% → paused", pid, percent);
                         }
                         Err(e) => {
                             println!("[mon:{}] pause failed: {}", pid, e);
                         }
                     }
-                } else if local_paused && percent < config.resume_threshold {
-                    match proc.resume() {
-                        Ok(()) => {
-                            local_paused = false;
-                            println!("[mon:{}] memory {:.1}% → resumed", pid, percent);
+                } else if local_paused {
+                    // Check if we've exceeded the max pause duration
+                    if let Some(max_dur) = config.max_pause_duration {
+                        if let Some(since) = paused_since {
+                            let elapsed = since.elapsed();
+                            if elapsed >= max_dur {
+                                match proc.kill() {
+                                    Ok(()) => {
+                                        killed = true;
+                                        println!("[mon:{}] paused for {:?} → killed", pid, elapsed);
+                                    }
+                                    Err(e) => {
+                                        println!("[mon:{}] kill failed: {}", pid, e);
+                                        // Continue monitoring; maybe resume will work later
+                                    }
+                                }
+                                continue;
+                            }
                         }
-                        Err(e) => {
-                            println!("[mon:{}] resume failed: {}", pid, e);
+                    }
+
+                    if percent < config.resume_threshold {
+                        match proc.resume() {
+                            Ok(()) => {
+                                local_paused = false;
+                                paused_since = None;
+                                println!("[mon:{}] memory {:.1}% → resumed", pid, percent);
+                            }
+                            Err(e) => {
+                                println!("[mon:{}] resume failed: {}", pid, e);
+                            }
                         }
                     }
                 }
@@ -118,7 +151,7 @@ impl MemoryMonitor {
             }
 
             // Always resume on shutdown so the process doesn't stay frozen.
-            if local_paused {
+            if local_paused && !killed {
                 let _ = proc.resume();
             }
         });
@@ -194,6 +227,10 @@ impl ProcessHandle {
     pub fn resume(&self) -> Result<(), ProcessError> {
         imp::resume(self)
     }
+
+    pub fn kill(&self) -> Result<(), ProcessError> {
+        imp::kill(self)
+    }
 }
 
 /* =================================================================== */
@@ -219,6 +256,10 @@ mod imp {
     pub fn resume(h: &ProcessHandle) -> Result<(), ProcessError> {
         kill(Pid::from_raw(h.pid as i32), Signal::SIGCONT).map_err(ProcessError::Nix)
     }
+
+    pub fn kill(h: &ProcessHandle) -> Result<(), ProcessError> {
+        kill(Pid::from_raw(h.pid as i32), Signal::SIGKILL).map_err(ProcessError::Nix)
+    }
 }
 
 /* =================================================================== */
@@ -227,10 +268,12 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::{ProcessError, ProcessHandle};
-    use std::io; // <-- ADDED
+    use std::io;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SUSPEND_RESUME};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE, TerminateProcess,
+    };
     use windows::core::{PCSTR, s, w};
 
     type NtSuspendProcess = unsafe extern "system" fn(HANDLE) -> i32;
@@ -241,8 +284,9 @@ mod imp {
             return Err(ProcessError::InvalidPid(pid));
         }
         unsafe {
-            let handle =
-                OpenProcess(PROCESS_SUSPEND_RESUME, false, pid).map_err(ProcessError::Windows)?;
+            // We need both suspend/resume and terminate rights.
+            let handle = OpenProcess(PROCESS_SUSPEND_RESUME | PROCESS_TERMINATE, false, pid)
+                .map_err(ProcessError::Windows)?;
             Ok(ProcessHandle { handle })
         }
     }
@@ -253,6 +297,10 @@ mod imp {
 
     pub fn resume(h: &ProcessHandle) -> Result<(), ProcessError> {
         call_ntdll(h.handle, s!("NtResumeProcess"), false)
+    }
+
+    pub fn kill(h: &ProcessHandle) -> Result<(), ProcessError> {
+        unsafe { TerminateProcess(h.handle, 1).map_err(ProcessError::Windows) }
     }
 
     pub fn close(h: &mut ProcessHandle) {
