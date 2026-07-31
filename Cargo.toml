@@ -37,4 +37,14 @@ blake3 = "1.8.5"
 ouroboros = "0.18.5"
 semver = "1.0"
 memmap2 = "0.9.11"
+sysinfo = "0.39.6"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["signal"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+] }

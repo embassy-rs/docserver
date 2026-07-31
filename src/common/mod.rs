@@ -1,6 +1,7 @@
 pub mod file;
 pub mod manifest;
 pub mod zup;
+pub mod process_control;
 
 use clap::Args;
 

@@ -13,6 +13,7 @@ use regex::{Regex, bytes};
 use crate::common::CompressionArgs;
 use crate::common::file::mmap_file;
 use crate::common::manifest;
+use crate::common::process_control::{MemoryMonitor, MonitorConfig};
 use crate::common::zup::write::pack;
 
 fn should_include_file(path: &Path) -> bool {
@@ -218,6 +219,10 @@ pub struct BuildArgs {
     #[clap(long)]
     pub cleanup: bool,
 
+    /// Whether to run the memory monitor
+    #[clap(long)]
+    pub monitor: bool,
+
     #[clap(flatten)]
     pub compression: CompressionArgs,
 }
@@ -291,55 +296,66 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         .stdin(Stdio::piped());
 
     let mut child = cmd.spawn()?;
+
+    let monitor = if args.monitor {
+        MemoryMonitor::new(&child, MonitorConfig::default())
+            .map_err(|e| println!("failed to start memory monitor: {:#}", e))
+            .ok()
+    } else {
+        None
+    };
+
     let mut debug = String::new();
-    {
-        let mut stdin = child.stdin.take().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
 
-        for (i, flavor) in flavors.iter().enumerate() {
-            let mut cmdargs = Vec::<String>::new();
+    for (i, flavor) in flavors.iter().enumerate() {
+        let mut cmdargs = Vec::<String>::new();
 
-            cmdargs.push("rustdoc".to_string());
-            cmdargs.push("--manifest-path".to_string());
-            cmdargs.push(args.input.join("Cargo.toml").to_str().unwrap().to_string());
-            cmdargs.push("--artifact-dir".to_string());
-            cmdargs.push(
-                cargo_out_dir
-                    .join(i.to_string())
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
-            );
-            cmdargs.push("--features".to_string());
-            cmdargs.push(flavor.features.join(",").to_string());
-            cmdargs.push("--target".to_string());
-            cmdargs.push(flavor.target.to_string());
-            cmdargs.push("--".to_string());
-            cmdargs.push("-Zunstable-options".to_string());
-            cmdargs.push("--static-root-path".to_string());
-            cmdargs.push("/static/".to_string());
+        cmdargs.push("rustdoc".to_string());
+        cmdargs.push("--manifest-path".to_string());
+        cmdargs.push(args.input.join("Cargo.toml").to_str().unwrap().to_string());
+        cmdargs.push("--artifact-dir".to_string());
+        cmdargs.push(
+            cargo_out_dir
+                .join(i.to_string())
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+        cmdargs.push("--features".to_string());
+        cmdargs.push(flavor.features.join(",").to_string());
+        cmdargs.push("--target".to_string());
+        cmdargs.push(flavor.target.to_string());
+        cmdargs.push("--".to_string());
+        cmdargs.push("-Zunstable-options".to_string());
+        cmdargs.push("--static-root-path".to_string());
+        cmdargs.push("/static/".to_string());
 
-            for (dep_name, dep) in &manifest.dependencies {
-                if let Some(_) = &dep.path {
-                    cmdargs.push(format!(
-                        "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
-                        dep_name.replace('-', "_"),
-                        dep_name,
-                    ));
-                }
+        for (dep_name, dep) in &manifest.dependencies {
+            if let Some(_) = &dep.path {
+                cmdargs.push(format!(
+                    "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
+                    dep_name.replace('-', "_"),
+                    dep_name,
+                ));
             }
-
-            let line = shell_words::join(cmdargs);
-
-            writeln!(stdin, "{}", &line)?;
-            writeln!(debug, "    --- {}", &line)?;
         }
+
+        let line = shell_words::join(cmdargs);
+
+        writeln!(stdin, "{}", &line)?;
+        writeln!(debug, "    --- {}", &line)?;
     }
+
+    drop(stdin);
 
     println!("Running cargo batch with {} flavors...", flavors.len());
     let status = child
         .wait_with_output()
         .expect("failed to execute process")
         .status;
+
+    drop(monitor);
 
     if !status.success() {
         println!("===============");

@@ -55,6 +55,10 @@ pub struct BuildReleaseArgs {
     #[clap(long)]
     pub cleanup: bool,
 
+    /// Whether to run the memory monitor
+    #[clap(long)]
+    pub monitor: bool,
+
     #[clap(flatten)]
     pub compression: CompressionArgs,
 }
@@ -255,6 +259,7 @@ async fn build_single_version(
         output_static: Some(output_static_dir),
         temp_dir: args.temp_dir.clone(),
         cleanup: args.cleanup,
+        monitor: args.monitor,
         compression: args.compression.clone(),
     };
 
