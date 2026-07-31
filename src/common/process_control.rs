@@ -28,9 +28,9 @@ pub struct MonitorConfig {
 impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
-            pause_threshold: 85.0,
-            resume_threshold: 70.0,
-            poll_interval: Duration::from_millis(750),
+            pause_threshold: 92.5,
+            resume_threshold: 90.0,
+            poll_interval: Duration::from_millis(250),
         }
     }
 }
