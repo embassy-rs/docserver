@@ -311,7 +311,6 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
     for (i, flavor) in flavors.iter().enumerate() {
         let mut cmdargs = vec![
             "rustdoc".to_string(),
-            "rustdoc".to_string(),
             "--manifest-path".to_string(),
             args.input.join("Cargo.toml").to_str().unwrap().to_string(),
             "--artifact-dir".to_string(),
