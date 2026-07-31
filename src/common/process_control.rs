@@ -112,8 +112,8 @@ impl MemoryMonitor {
                     }
                 } else if local_paused {
                     // Check if we've exceeded the max pause duration
-                    if let Some(max_dur) = config.max_pause_duration {
-                        if let Some(since) = paused_since {
+                    if let Some(max_dur) = config.max_pause_duration
+                        && let Some(since) = paused_since {
                             let elapsed = since.elapsed();
                             if elapsed >= max_dur {
                                 match proc.kill() {
@@ -129,7 +129,6 @@ impl MemoryMonitor {
                                 continue;
                             }
                         }
-                    }
 
                     if percent < config.resume_threshold {
                         match proc.resume() {
