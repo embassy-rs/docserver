@@ -239,7 +239,7 @@ impl ProcessHandle {
 #[cfg(unix)]
 mod imp {
     use super::{ProcessError, ProcessHandle};
-    use nix::sys::signal::{Signal, kill};
+    use nix::sys::signal::{Signal, kill as nix_kill};
     use nix::unistd::Pid;
 
     pub fn open(pid: u32) -> Result<ProcessHandle, ProcessError> {
@@ -250,15 +250,15 @@ mod imp {
     }
 
     pub fn pause(h: &ProcessHandle) -> Result<(), ProcessError> {
-        kill(Pid::from_raw(h.pid as i32), Signal::SIGSTOP).map_err(ProcessError::Nix)
+        nix_kill(Pid::from_raw(h.pid as i32), Signal::SIGSTOP).map_err(ProcessError::Nix)
     }
 
     pub fn resume(h: &ProcessHandle) -> Result<(), ProcessError> {
-        kill(Pid::from_raw(h.pid as i32), Signal::SIGCONT).map_err(ProcessError::Nix)
+        nix_kill(Pid::from_raw(h.pid as i32), Signal::SIGCONT).map_err(ProcessError::Nix)
     }
 
     pub fn kill(h: &ProcessHandle) -> Result<(), ProcessError> {
-        kill(Pid::from_raw(h.pid as i32), Signal::SIGKILL).map_err(ProcessError::Nix)
+        nix_kill(Pid::from_raw(h.pid as i32), Signal::SIGKILL).map_err(ProcessError::Nix)
     }
 }
 
