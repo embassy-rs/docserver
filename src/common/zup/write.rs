@@ -56,6 +56,7 @@ pub fn pack(
     let f = fs::File::create(output_path)?;
 
     let mut file_cache = FileCache::default();
+    let mut vma_count: u32 = 0;
 
     let comp = match compress {
         Some(compress) => {
@@ -84,7 +85,16 @@ pub fn pack(
                         training_sizes.push(file_data.as_ref().len());
                         training_data.extend_from_slice(file_data.as_ref());
                         file_cache.hash_cache.insert(file_path, file_hash);
-                        e.insert(file_data);
+
+                        if file_data.is_mapped() {
+                            vma_count += 1;
+                        }
+
+                        if file_data.is_mapped() && vma_count > 25_000 {
+                            e.insert(file_data.to_vec());
+                        } else {
+                            e.insert(file_data);
+                        }
                     }
                 }
             }

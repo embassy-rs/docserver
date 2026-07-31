@@ -10,6 +10,21 @@ pub enum FileData {
     Mmap(memmap2::Mmap),
 }
 
+impl FileData {
+    #[inline]
+    pub const fn is_mapped(&self) -> bool {
+        matches!(self, Self::Mmap(_))
+    }
+
+    #[inline]
+    pub fn to_vec(self) -> Self {
+        Self::Vec(match self {
+            Self::Vec(vec) => vec,
+            Self::Mmap(mmap) => mmap.as_ref().to_vec(),
+        })
+    }
+}
+
 impl AsRef<[u8]> for FileData {
     fn as_ref(&self) -> &[u8] {
         match self {
