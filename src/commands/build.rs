@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
@@ -10,11 +11,13 @@ use regex::bytes::Regex as ByteRegex;
 use regex::{Regex, bytes};
 
 use crate::common::CompressionArgs;
+use crate::common::file::mmap_file;
 use crate::common::manifest;
+use crate::common::process_control::{MemoryMonitor, MonitorConfig};
 use crate::common::zup::write::pack;
 
 fn should_include_file(path: &Path) -> bool {
-    path.file_name().map_or(true, |f| {
+    path.file_name().is_none_or(|f| {
         f != "implementors" && !f.to_str().unwrap().starts_with('_') && !path.ends_with("!.html")
     })
 }
@@ -42,7 +45,7 @@ impl FlavorProcessor {
 
         // Rewrite srclinks from `../../crate_name/foo" to "/__DOCSERVER_SRCLINK/foo".
         let re_rewrite_src =
-            ByteRegex::new(&format!(r##"href="(\.\./)+src/{}"##, &crate_name)).unwrap();
+            ByteRegex::new(&format!(r##"href="(\.\./)+src/{}"##, crate_name)).unwrap();
 
         // Remove crates.js
         let re_remove_cratesjs =
@@ -50,7 +53,7 @@ impl FlavorProcessor {
                 .unwrap();
 
         // Rewrite links from `../crate_name" to "".
-        let re_rewrite_root = ByteRegex::new(&format!(r##"\.\./{}/"##, &crate_name)).unwrap();
+        let re_rewrite_root = ByteRegex::new(&format!(r##"\.\./{}/"##, crate_name)).unwrap();
 
         let re_fix_root_path = ByteRegex::new(r##"data-root-path="\.\./"##).unwrap();
 
@@ -67,9 +70,9 @@ impl FlavorProcessor {
 
     fn process_html_file(&self, src_path: &PathBuf, dest_path: &PathBuf) -> anyhow::Result<()> {
         if src_path.extension().and_then(|s| s.to_str()) == Some("html") {
-            let data = fs::read(&src_path)?;
+            let data = unsafe { mmap_file(src_path, &fs::metadata(src_path)?)? };
 
-            let res = self.re_remove_settings.replace_all(&data, &[][..]);
+            let res = self.re_remove_settings.replace_all(data.as_ref(), &[][..]);
             let res = self.re_remove_hidden_src.replace_all(&res, &[][..]);
             let res = self.re_remove_cratesjs.replace_all(
                 &res,
@@ -88,9 +91,16 @@ impl FlavorProcessor {
                 .re_fix_root_path
                 .replace_all(&res, &b"data-root-path=\"./"[..]);
 
-            fs::write(&dest_path, &res)?;
+            match res {
+                Cow::Owned(ref res) => fs::write(dest_path, res)?,
+                Cow::Borrowed(_) => {
+                    drop(data); // Drop must occur before modifying file
+
+                    fs::rename(src_path, dest_path)?;
+                }
+            };
         } else {
-            fs::rename(&src_path, &dest_path)?;
+            fs::rename(src_path, dest_path)?;
         };
 
         Ok(())
@@ -103,14 +113,15 @@ impl FlavorProcessor {
             let src_path = entry.path();
             let file_name = entry.file_name();
             let dest_path = dest_dir.join(&file_name);
+            let file_type = entry.file_type()?;
 
-            if src_path.is_dir() {
+            if file_type.is_dir() {
                 // Skip directories that should be filtered
                 if should_include_file(&src_path) {
                     fs::create_dir_all(&dest_path)?;
                     self.copy_and_process_dir(&src_path, &dest_path)?;
                 }
-            } else {
+            } else if file_type.is_file() {
                 // Skip files that should be filtered
                 if should_include_file(&src_path) {
                     self.process_html_file(&src_path, &dest_path)?;
@@ -208,6 +219,10 @@ pub struct BuildArgs {
     #[clap(long)]
     pub cleanup: bool,
 
+    /// Whether to run the memory monitor
+    #[clap(long)]
+    pub monitor: bool,
+
     #[clap(flatten)]
     pub compression: CompressionArgs,
 }
@@ -257,7 +272,7 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
     let manifest = load_manifest(&args.input);
 
     let mut cmd = Command::new("git");
-    cmd.args(&["rev-parse", "HEAD"]);
+    cmd.args(["rev-parse", "HEAD"]);
     cmd.current_dir(&args.input);
     let output = cmd.output().unwrap();
     assert!(output.status.success());
@@ -281,55 +296,64 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         .stdin(Stdio::piped());
 
     let mut child = cmd.spawn()?;
+
+    let monitor = if args.monitor {
+        MemoryMonitor::new(&child, MonitorConfig::default())
+            .map_err(|e| println!("failed to start memory monitor: {:#}", e))
+            .ok()
+    } else {
+        None
+    };
+
     let mut debug = String::new();
-    {
-        let mut stdin = child.stdin.take().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
 
-        for (i, flavor) in flavors.iter().enumerate() {
-            let mut cmdargs = Vec::<String>::new();
+    for (i, flavor) in flavors.iter().enumerate() {
+        let mut cmdargs = vec![
+            "rustdoc".to_string(),
+            "--manifest-path".to_string(),
+            args.input.join("Cargo.toml").to_str().unwrap().to_string(),
+            "--artifact-dir".to_string(),
+            cargo_out_dir
+                .join(i.to_string())
+                .to_str()
+                .unwrap()
+                .to_string(),
+            "--features".to_string(),
+            flavor.features.join(",").to_string(),
+            "--target".to_string(),
+            flavor.target.to_string(),
+            "--".to_string(),
+            "-Zunstable-options".to_string(),
+            "--static-root-path".to_string(),
+            "/static/".to_string(),
+        ];
 
-            cmdargs.push("rustdoc".to_string());
-            cmdargs.push("--manifest-path".to_string());
-            cmdargs.push(args.input.join("Cargo.toml").to_str().unwrap().to_string());
-            cmdargs.push("--artifact-dir".to_string());
-            cmdargs.push(
-                cargo_out_dir
-                    .join(i.to_string())
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
-            );
-            cmdargs.push("--features".to_string());
-            cmdargs.push(flavor.features.join(",").to_string());
-            cmdargs.push("--target".to_string());
-            cmdargs.push(flavor.target.to_string());
-            cmdargs.push("--".to_string());
-            cmdargs.push("-Zunstable-options".to_string());
-            cmdargs.push("--static-root-path".to_string());
-            cmdargs.push("/static/".to_string());
-
-            for (dep_name, dep) in &manifest.dependencies {
-                if let Some(_) = &dep.path {
-                    cmdargs.push(format!(
-                        "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
-                        dep_name.replace('-', "_"),
-                        dep_name,
-                    ));
-                }
+        for (dep_name, dep) in &manifest.dependencies {
+            if dep.path.is_some() {
+                cmdargs.push(format!(
+                    "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
+                    dep_name.replace('-', "_"),
+                    dep_name,
+                ));
             }
-
-            let line = shell_words::join(cmdargs);
-
-            writeln!(stdin, "{}", &line)?;
-            writeln!(debug, "    --- {}", &line)?;
         }
+
+        let line = shell_words::join(cmdargs);
+
+        writeln!(stdin, "{}", line)?;
+        writeln!(debug, "    --- {}", line)?;
     }
+
+    drop(stdin);
 
     println!("Running cargo batch with {} flavors...", flavors.len());
     let status = child
         .wait_with_output()
         .expect("failed to execute process")
         .status;
+
+    drop(monitor);
 
     if !status.success() {
         println!("===============");
@@ -380,30 +404,30 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         fs::create_dir_all(&flavor_output_dir)?;
 
         // Copy and process the documentation files
-        FlavorProcessor::new(&crate_name)
+        FlavorProcessor::new(crate_name)
             .copy_and_process_dir(&doc_crate_dir, &flavor_output_dir)?;
 
         // Copy static files only once
-        if let Some(static_path) = &args.output_static {
-            if !statics_copied {
-                fs::create_dir_all(static_path).unwrap();
-                // recursive copy
-                let doc_static_dir = doc_dir.join("static.files");
-                let mut stack = vec![doc_static_dir.clone()];
-                while let Some(path) = stack.pop() {
-                    if path.is_dir() {
-                        for entry in fs::read_dir(path).unwrap() {
-                            stack.push(entry.unwrap().path());
-                        }
-                    } else {
-                        let rel_path = path.strip_prefix(&doc_static_dir).unwrap();
-                        let target_path = static_path.join(rel_path);
-                        let _ = fs::create_dir_all(target_path.parent().unwrap());
-                        fs::copy(path, target_path).unwrap();
+        if let Some(static_path) = &args.output_static
+            && !statics_copied
+        {
+            fs::create_dir_all(static_path).unwrap();
+            // recursive copy
+            let doc_static_dir = doc_dir.join("static.files");
+            let mut stack = vec![doc_static_dir.clone()];
+            while let Some(path) = stack.pop() {
+                if path.is_dir() {
+                    for entry in fs::read_dir(path).unwrap() {
+                        stack.push(entry.unwrap().path());
                     }
+                } else {
+                    let rel_path = path.strip_prefix(&doc_static_dir).unwrap();
+                    let target_path = static_path.join(rel_path);
+                    let _ = fs::create_dir_all(target_path.parent().unwrap());
+                    fs::copy(path, target_path).unwrap();
                 }
-                statics_copied = true;
             }
+            statics_copied = true;
         }
     }
 
