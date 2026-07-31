@@ -1,5 +1,6 @@
 //! File access utils
 
+use std::fs::Metadata;
 use std::path::Path;
 use std::{fs, io};
 
@@ -20,8 +21,9 @@ impl AsRef<[u8]> for FileData {
 
 // SAFETY: mmap is safe as long as the file is not truncated concurrently.
 // For a packer reading a static tree this is a reasonable assumption.
-pub unsafe fn read_file_via_mmap(path: &Path) -> io::Result<FileData> {
-    if let Ok(file) = fs::File::open(path)
+pub unsafe fn mmap_file(path: &Path, meta: &Metadata) -> io::Result<FileData> {
+    if meta.len() > 4096
+        && let Ok(file) = fs::File::open(path)
         && let Ok(mmap) = unsafe { memmap2::Mmap::map(&file) }
     {
         #[cfg(unix)]

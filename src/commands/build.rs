@@ -11,7 +11,7 @@ use regex::bytes::Regex as ByteRegex;
 use regex::{Regex, bytes};
 
 use crate::common::CompressionArgs;
-use crate::common::file::read_file_via_mmap;
+use crate::common::file::mmap_file;
 use crate::common::manifest;
 use crate::common::zup::write::pack;
 
@@ -69,7 +69,7 @@ impl FlavorProcessor {
 
     fn process_html_file(&self, src_path: &PathBuf, dest_path: &PathBuf) -> anyhow::Result<()> {
         if src_path.extension().and_then(|s| s.to_str()) == Some("html") {
-            let data = unsafe { read_file_via_mmap(&src_path)? };
+            let data = unsafe { mmap_file(&src_path, &fs::metadata(&src_path)?)? };
 
             let res = self.re_remove_settings.replace_all(data.as_ref(), &[][..]);
             let res = self.re_remove_hidden_src.replace_all(&res, &[][..]);

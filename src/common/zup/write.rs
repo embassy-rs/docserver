@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zstd::bulk::Compressor;
 
-use crate::common::file::{FileData, read_file_via_mmap};
+use crate::common::file::{FileData, mmap_file};
 
 use super::layout;
 
@@ -74,7 +74,7 @@ pub fn pack(
                     break;
                 }
 
-                let file_data = unsafe { read_file_via_mmap(&file_path)? };
+                let file_data = unsafe { mmap_file(&file_path, &fs::metadata(&file_path)?)? };
                 let file_hash = hash(file_data.as_ref());
 
                 match file_cache.file_cache.entry(file_hash) {
@@ -205,16 +205,12 @@ impl Writer {
 
             if let Some((buf, cached_hash)) = cache.get(&path) {
                 self.write_node(buf, Some(cached_hash))
-            } else if m.len() > 4096
-                && let Ok(file_data) = unsafe { read_file_via_mmap(path) }
-            {
+            } else {
+                let file_data = unsafe { mmap_file(path, &m)? };
+
                 // For files larger than 4 KiB, try mmap to avoid a kernel copy
                 // and a heap allocation. Fall back to fs::read on failure.
                 self.write_node(file_data.as_ref(), None)
-            } else {
-                let buf = fs::read(path)?;
-
-                self.write_node(&buf, None)
             }
         }
     }
