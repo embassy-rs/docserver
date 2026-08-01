@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::Write as _;
-use std::fs;
+use std::fs::{self, Metadata};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
@@ -68,9 +68,14 @@ impl FlavorProcessor {
         }
     }
 
-    fn process_html_file(&self, src_path: &PathBuf, dest_path: &PathBuf) -> anyhow::Result<()> {
+    fn process_html_file(
+        &self,
+        src_path: &PathBuf,
+        dest_path: &PathBuf,
+        meta: &Metadata,
+    ) -> anyhow::Result<()> {
         if src_path.extension().and_then(|s| s.to_str()) == Some("html") {
-            let data = unsafe { mmap_file(src_path, &fs::metadata(src_path)?)? };
+            let data = unsafe { mmap_file(src_path, meta)? };
 
             let res = self.re_remove_settings.replace_all(data.as_ref(), &[][..]);
             let res = self.re_remove_hidden_src.replace_all(&res, &[][..]);
@@ -124,7 +129,7 @@ impl FlavorProcessor {
             } else if file_type.is_file() {
                 // Skip files that should be filtered
                 if should_include_file(&src_path) {
-                    self.process_html_file(&src_path, &dest_path)?;
+                    self.process_html_file(&src_path, &dest_path, &entry.metadata()?)?;
                 }
             }
         }
