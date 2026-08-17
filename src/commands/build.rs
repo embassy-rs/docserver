@@ -30,6 +30,7 @@ struct FlavorProcessor {
     re_remove_cratesjs: bytes::Regex,
     re_rewrite_root: bytes::Regex,
     re_fix_root_path: bytes::Regex,
+    re_implementors_list: bytes::Regex,
     crate_name: String,
 }
 
@@ -58,6 +59,9 @@ impl FlavorProcessor {
 
         let re_fix_root_path = ByteRegex::new(r##"data-root-path="\.\./"##).unwrap();
 
+        let re_implementors_list =
+            ByteRegex::new(r#"<div([^>]*\bid="implementors-list"\b[^>]*)>"#).unwrap();
+
         Self {
             re_remove_settings,
             re_remove_hidden_src,
@@ -65,6 +69,7 @@ impl FlavorProcessor {
             re_remove_cratesjs,
             re_rewrite_root,
             re_fix_root_path,
+            re_implementors_list,
             crate_name,
         }
     }
@@ -96,6 +101,10 @@ impl FlavorProcessor {
             let res = self
                 .re_fix_root_path
                 .replace_all(&res, &b"data-root-path=\"./"[..]);
+
+            let res = self
+                .re_implementors_list
+                .replace(&res, &b"<div$1 class=\"loaded\">"[..]);
 
             match res {
                 Cow::Owned(ref res) => fs::write(dest_path, res)?,
