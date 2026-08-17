@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 
 use clap::Parser;
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use regex::bytes::Regex as ByteRegex;
 use regex::{Regex, bytes};
 
@@ -248,12 +249,16 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
 
     // Clean the temp directories (but not the target dir)
     if cargo_out_dir.exists() {
+        println!("removing out directory...");
         fs::remove_dir_all(&cargo_out_dir)?;
+        println!("removing out directory...done.");
     }
     fs::create_dir_all(&cargo_out_dir)?;
 
     if is_zup_output && build_tree_dir.exists() {
+        println!("removing build tree directory...");
         fs::remove_dir_all(&build_tree_dir)?;
+        println!("removing build tree directory...done");
     }
 
     // Determine the actual build output directory
@@ -377,11 +382,38 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
     fs::create_dir_all(&flavors_dir)?;
 
     let crate_name = &manifest.package.name;
-    let mut statics_copied = false;
 
-    // Process all flavors serially
-    for (i, flavor) in flavors.iter().enumerate() {
+    // Copy static files only once
+    if let Some(static_path) = &args.output_static
+        && !flavors.is_empty()
+    {
+        println!("copying statics...");
+
+        let i = 0;
+        let doc_dir = cargo_out_dir.join(i.to_string());
+
+        fs::create_dir_all(static_path).unwrap();
+        // recursive copy
+        let doc_static_dir = doc_dir.join("static.files");
+        let mut stack = vec![doc_static_dir.clone()];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    stack.push(entry.unwrap().path());
+                }
+            } else {
+                let rel_path = path.strip_prefix(&doc_static_dir).unwrap();
+                let target_path = static_path.join(rel_path);
+                let _ = fs::create_dir_all(target_path.parent().unwrap());
+                fs::copy(path, target_path).unwrap();
+            }
+        }
+    }
+
+    // Process all flavors in parallel
+    flavors.par_iter().enumerate().try_for_each(|(i, flavor)| {
         println!("processing {:?} ...", flavor);
+
         let doc_dir = cargo_out_dir.join(i.to_string());
         let doc_crate_dir = doc_dir.join(crate_name.replace('-', "_"));
 
@@ -412,29 +444,8 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         FlavorProcessor::new(crate_name)
             .copy_and_process_dir(&doc_crate_dir, &flavor_output_dir)?;
 
-        // Copy static files only once
-        if let Some(static_path) = &args.output_static
-            && !statics_copied
-        {
-            fs::create_dir_all(static_path).unwrap();
-            // recursive copy
-            let doc_static_dir = doc_dir.join("static.files");
-            let mut stack = vec![doc_static_dir.clone()];
-            while let Some(path) = stack.pop() {
-                if path.is_dir() {
-                    for entry in fs::read_dir(path).unwrap() {
-                        stack.push(entry.unwrap().path());
-                    }
-                } else {
-                    let rel_path = path.strip_prefix(&doc_static_dir).unwrap();
-                    let target_path = static_path.join(rel_path);
-                    let _ = fs::create_dir_all(target_path.parent().unwrap());
-                    fs::copy(path, target_path).unwrap();
-                }
-            }
-            statics_copied = true;
-        }
-    }
+        Ok::<_, anyhow::Error>(())
+    })?;
 
     // Write the manifest and info files to the output directory
     fs::write(build_output_dir.join("Cargo.toml"), manifest_bytes)?;

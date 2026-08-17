@@ -1,3 +1,4 @@
+pub mod blocking_map;
 pub mod file;
 pub mod manifest;
 pub mod process_control;
