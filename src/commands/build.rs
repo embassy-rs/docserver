@@ -302,89 +302,94 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
 
     // Collect all flavors first to build the cargo batch command
     let flavors: Vec<_> = calc_flavors(&manifest);
+    let mut j = 0;
 
-    // Build the cargo batch command
-    let mut cmd = Command::new("cargo");
-    cmd.arg("batch")
-        .arg("--target-dir")
-        .arg(&cargo_target_dir)
-        .arg("-Zunstable-options")
-        .arg("-Zrustdoc-map")
-        .arg("--stdin")
-        .env("CARGO_TARGET_DIR", &cargo_target_dir)
-        .stdin(Stdio::piped());
+    for flavors in flavors.chunks(850) {
+        // Build the cargo batch command
+        let mut cmd = Command::new("cargo");
+        cmd.arg("batch")
+            .arg("--target-dir")
+            .arg(&cargo_target_dir)
+            .arg("-Zunstable-options")
+            .arg("-Zrustdoc-map")
+            .arg("--stdin")
+            .env("CARGO_TARGET_DIR", &cargo_target_dir)
+            .stdin(Stdio::piped());
 
-    let mut child = cmd.spawn()?;
+        let mut child = cmd.spawn()?;
 
-    let monitor = if args.monitor {
-        MemoryMonitor::new(&child, MonitorConfig::default())
-            .map_err(|e| println!("failed to start memory monitor: {:#}", e))
-            .ok()
-    } else {
-        None
-    };
+        let monitor = if args.monitor {
+            MemoryMonitor::new(&child, MonitorConfig::default())
+                .map_err(|e| println!("failed to start memory monitor: {:#}", e))
+                .ok()
+        } else {
+            None
+        };
 
-    let mut debug = String::new();
-    let mut stdin = child.stdin.take().unwrap();
+        let mut debug = String::new();
+        let mut stdin = child.stdin.take().unwrap();
 
-    for (i, flavor) in flavors.iter().enumerate() {
-        let mut cmdargs = vec![
-            "rustdoc".to_string(),
-            "--manifest-path".to_string(),
-            args.input.join("Cargo.toml").to_str().unwrap().to_string(),
-            "--artifact-dir".to_string(),
-            cargo_out_dir
-                .join(i.to_string())
-                .to_str()
-                .unwrap()
-                .to_string(),
-            "--features".to_string(),
-            flavor.features.join(",").to_string(),
-            "--target".to_string(),
-            flavor.target.to_string(),
-            "--".to_string(),
-            "-Zunstable-options".to_string(),
-            "--static-root-path".to_string(),
-            "/static/".to_string(),
-        ];
+        for (i, flavor) in flavors.iter().enumerate() {
+            let mut cmdargs = vec![
+                "rustdoc".to_string(),
+                "--manifest-path".to_string(),
+                args.input.join("Cargo.toml").to_str().unwrap().to_string(),
+                "--artifact-dir".to_string(),
+                cargo_out_dir
+                    .join((i + j).to_string())
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                "--features".to_string(),
+                flavor.features.join(",").to_string(),
+                "--target".to_string(),
+                flavor.target.to_string(),
+                "--".to_string(),
+                "-Zunstable-options".to_string(),
+                "--static-root-path".to_string(),
+                "/static/".to_string(),
+            ];
 
-        for (dep_name, dep) in &manifest.dependencies {
-            if dep.path.is_some() {
-                cmdargs.push(format!(
-                    "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
-                    dep_name.replace('-', "_"),
-                    dep_name,
-                ));
+            for (dep_name, dep) in &manifest.dependencies {
+                if dep.path.is_some() {
+                    cmdargs.push(format!(
+                        "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
+                        dep_name.replace('-', "_"),
+                        dep_name,
+                    ));
+                }
             }
+
+            let line = shell_words::join(cmdargs);
+
+            writeln!(stdin, "{}", line)?;
+            writeln!(debug, "    --- {}", line)?;
         }
 
-        let line = shell_words::join(cmdargs);
+        drop(stdin);
 
-        writeln!(stdin, "{}", line)?;
-        writeln!(debug, "    --- {}", line)?;
+        println!("Running cargo batch with {} flavors...", flavors.len());
+        let status = child
+            .wait_with_output()
+            .expect("failed to execute process")
+            .status;
+
+        drop(monitor);
+
+        if !status.success() {
+            println!("===============");
+            println!("failed to execute cmd :");
+            println!("{:?}", cmd);
+            println!("{}", debug);
+            println!("exit code : {:?}", status);
+            println!("===============");
+            process::exit(1);
+        }
+
+        drop(debug);
+
+        j += flavors.len();
     }
-
-    drop(stdin);
-
-    println!("Running cargo batch with {} flavors...", flavors.len());
-    let status = child
-        .wait_with_output()
-        .expect("failed to execute process")
-        .status;
-
-    drop(monitor);
-
-    if !status.success() {
-        println!("===============");
-        println!("failed to execute cmd :");
-        println!("{:?}", cmd);
-        println!("{}", debug);
-        println!("exit code : {:?}", status);
-        println!("===============");
-        process::exit(1);
-    }
-
-    drop(debug);
 
     // Create flavors directory in output
     let flavors_dir = build_output_dir.join("flavors");
