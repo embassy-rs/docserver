@@ -1,6 +1,6 @@
 [package]
 name = "docserver"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 
 
@@ -38,6 +38,7 @@ ouroboros = "0.18.5"
 semver = "1.0"
 memmap2 = "0.9.11"
 sysinfo = "0.39.6"
+rayon = "1.12.0"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["signal"] }

@@ -37,7 +37,7 @@ impl AsRef<[u8]> for FileData {
 // SAFETY: mmap is safe as long as the file is not truncated concurrently.
 // For a packer reading a static tree this is a reasonable assumption.
 pub unsafe fn mmap_file(path: &Path, meta: &Metadata) -> io::Result<FileData> {
-    if meta.len() > 4096
+    if meta.len() > 16 * 1024
         && let Ok(file) = fs::File::open(path)
         && let Ok(mmap) = unsafe { memmap2::Mmap::map(&file) }
     {

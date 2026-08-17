@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 
 use clap::Parser;
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use regex::bytes::Regex as ByteRegex;
 use regex::{Regex, bytes};
 
@@ -29,6 +30,7 @@ struct FlavorProcessor {
     re_remove_cratesjs: bytes::Regex,
     re_rewrite_root: bytes::Regex,
     re_fix_root_path: bytes::Regex,
+    re_implementors_list: bytes::Regex,
     crate_name: String,
 }
 
@@ -57,6 +59,9 @@ impl FlavorProcessor {
 
         let re_fix_root_path = ByteRegex::new(r##"data-root-path="\.\./"##).unwrap();
 
+        let re_implementors_list =
+            ByteRegex::new(r#"<div([^>]*\bid="implementors-list"\b[^>]*)>"#).unwrap();
+
         Self {
             re_remove_settings,
             re_remove_hidden_src,
@@ -64,6 +69,7 @@ impl FlavorProcessor {
             re_remove_cratesjs,
             re_rewrite_root,
             re_fix_root_path,
+            re_implementors_list,
             crate_name,
         }
     }
@@ -95,6 +101,10 @@ impl FlavorProcessor {
             let res = self
                 .re_fix_root_path
                 .replace_all(&res, &b"data-root-path=\"./"[..]);
+
+            let res = self
+                .re_implementors_list
+                .replace(&res, &b"<div$1 class=\"loaded\">"[..]);
 
             match res {
                 Cow::Owned(ref res) => fs::write(dest_path, res)?,
@@ -248,12 +258,16 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
 
     // Clean the temp directories (but not the target dir)
     if cargo_out_dir.exists() {
+        println!("removing out directory...");
         fs::remove_dir_all(&cargo_out_dir)?;
+        println!("removing out directory...done.");
     }
     fs::create_dir_all(&cargo_out_dir)?;
 
     if is_zup_output && build_tree_dir.exists() {
+        println!("removing build tree directory...");
         fs::remove_dir_all(&build_tree_dir)?;
+        println!("removing build tree directory...done");
     }
 
     // Determine the actual build output directory
@@ -288,100 +302,132 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
 
     // Collect all flavors first to build the cargo batch command
     let flavors: Vec<_> = calc_flavors(&manifest);
+    let mut j = 0;
 
-    // Build the cargo batch command
-    let mut cmd = Command::new("cargo");
-    cmd.arg("batch")
-        .arg("--target-dir")
-        .arg(&cargo_target_dir)
-        .arg("-Zunstable-options")
-        .arg("-Zrustdoc-map")
-        .arg("--stdin")
-        .env("CARGO_TARGET_DIR", &cargo_target_dir)
-        .stdin(Stdio::piped());
+    for flavors in flavors.chunks(850) {
+        // Build the cargo batch command
+        let mut cmd = Command::new("cargo");
+        cmd.arg("batch")
+            .arg("--target-dir")
+            .arg(&cargo_target_dir)
+            .arg("-Zunstable-options")
+            .arg("-Zrustdoc-map")
+            .arg("--stdin")
+            .env("CARGO_TARGET_DIR", &cargo_target_dir)
+            .stdin(Stdio::piped());
 
-    let mut child = cmd.spawn()?;
+        let mut child = cmd.spawn()?;
 
-    let monitor = if args.monitor {
-        MemoryMonitor::new(&child, MonitorConfig::default())
-            .map_err(|e| println!("failed to start memory monitor: {:#}", e))
-            .ok()
-    } else {
-        None
-    };
+        let monitor = if args.monitor {
+            MemoryMonitor::new(&child, MonitorConfig::default())
+                .map_err(|e| println!("failed to start memory monitor: {:#}", e))
+                .ok()
+        } else {
+            None
+        };
 
-    let mut debug = String::new();
-    let mut stdin = child.stdin.take().unwrap();
+        let mut debug = String::new();
+        let mut stdin = child.stdin.take().unwrap();
 
-    for (i, flavor) in flavors.iter().enumerate() {
-        let mut cmdargs = vec![
-            "rustdoc".to_string(),
-            "--manifest-path".to_string(),
-            args.input.join("Cargo.toml").to_str().unwrap().to_string(),
-            "--artifact-dir".to_string(),
-            cargo_out_dir
-                .join(i.to_string())
-                .to_str()
-                .unwrap()
-                .to_string(),
-            "--features".to_string(),
-            flavor.features.join(",").to_string(),
-            "--target".to_string(),
-            flavor.target.to_string(),
-            "--".to_string(),
-            "-Zunstable-options".to_string(),
-            "--static-root-path".to_string(),
-            "/static/".to_string(),
-        ];
+        for (i, flavor) in flavors.iter().enumerate() {
+            let mut cmdargs = vec![
+                "rustdoc".to_string(),
+                "--manifest-path".to_string(),
+                args.input.join("Cargo.toml").to_str().unwrap().to_string(),
+                "--artifact-dir".to_string(),
+                cargo_out_dir
+                    .join((i + j).to_string())
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                "--features".to_string(),
+                flavor.features.join(",").to_string(),
+                "--target".to_string(),
+                flavor.target.to_string(),
+                "--".to_string(),
+                "-Zunstable-options".to_string(),
+                "--static-root-path".to_string(),
+                "/static/".to_string(),
+            ];
 
-        for (dep_name, dep) in &manifest.dependencies {
-            if dep.path.is_some() {
-                cmdargs.push(format!(
-                    "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
-                    dep_name.replace('-', "_"),
-                    dep_name,
-                ));
+            for (dep_name, dep) in &manifest.dependencies {
+                if dep.path.is_some() {
+                    cmdargs.push(format!(
+                        "--extern-html-root-url={}=/__DOCSERVER_DEPLINK/{}/",
+                        dep_name.replace('-', "_"),
+                        dep_name,
+                    ));
+                }
             }
+
+            let line = shell_words::join(cmdargs);
+
+            writeln!(stdin, "{}", line)?;
+            writeln!(debug, "    --- {}", line)?;
         }
 
-        let line = shell_words::join(cmdargs);
+        drop(stdin);
 
-        writeln!(stdin, "{}", line)?;
-        writeln!(debug, "    --- {}", line)?;
+        println!("Running cargo batch with {} flavors...", flavors.len());
+        let status = child
+            .wait_with_output()
+            .expect("failed to execute process")
+            .status;
+
+        drop(monitor);
+
+        if !status.success() {
+            println!("===============");
+            println!("failed to execute cmd :");
+            println!("{:?}", cmd);
+            println!("{}", debug);
+            println!("exit code : {:?}", status);
+            println!("===============");
+            process::exit(1);
+        }
+
+        drop(debug);
+
+        j += flavors.len();
     }
-
-    drop(stdin);
-
-    println!("Running cargo batch with {} flavors...", flavors.len());
-    let status = child
-        .wait_with_output()
-        .expect("failed to execute process")
-        .status;
-
-    drop(monitor);
-
-    if !status.success() {
-        println!("===============");
-        println!("failed to execute cmd :");
-        println!("{:?}", cmd);
-        println!("{}", debug);
-        println!("exit code : {:?}", status);
-        println!("===============");
-        process::exit(1);
-    }
-
-    drop(debug);
 
     // Create flavors directory in output
     let flavors_dir = build_output_dir.join("flavors");
     fs::create_dir_all(&flavors_dir)?;
 
     let crate_name = &manifest.package.name;
-    let mut statics_copied = false;
 
-    // Process all flavors serially
-    for (i, flavor) in flavors.iter().enumerate() {
+    // Copy static files only once
+    if let Some(static_path) = &args.output_static
+        && !flavors.is_empty()
+    {
+        println!("copying statics...");
+
+        let i = 0;
+        let doc_dir = cargo_out_dir.join(i.to_string());
+
+        fs::create_dir_all(static_path).unwrap();
+        // recursive copy
+        let doc_static_dir = doc_dir.join("static.files");
+        let mut stack = vec![doc_static_dir.clone()];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    stack.push(entry.unwrap().path());
+                }
+            } else {
+                let rel_path = path.strip_prefix(&doc_static_dir).unwrap();
+                let target_path = static_path.join(rel_path);
+                let _ = fs::create_dir_all(target_path.parent().unwrap());
+                fs::copy(path, target_path).unwrap();
+            }
+        }
+    }
+
+    // Process all flavors in parallel
+    flavors.par_iter().enumerate().try_for_each(|(i, flavor)| {
         println!("processing {:?} ...", flavor);
+
         let doc_dir = cargo_out_dir.join(i.to_string());
         let doc_crate_dir = doc_dir.join(crate_name.replace('-', "_"));
 
@@ -412,29 +458,8 @@ pub async fn run(args: BuildArgs) -> anyhow::Result<()> {
         FlavorProcessor::new(crate_name)
             .copy_and_process_dir(&doc_crate_dir, &flavor_output_dir)?;
 
-        // Copy static files only once
-        if let Some(static_path) = &args.output_static
-            && !statics_copied
-        {
-            fs::create_dir_all(static_path).unwrap();
-            // recursive copy
-            let doc_static_dir = doc_dir.join("static.files");
-            let mut stack = vec![doc_static_dir.clone()];
-            while let Some(path) = stack.pop() {
-                if path.is_dir() {
-                    for entry in fs::read_dir(path).unwrap() {
-                        stack.push(entry.unwrap().path());
-                    }
-                } else {
-                    let rel_path = path.strip_prefix(&doc_static_dir).unwrap();
-                    let target_path = static_path.join(rel_path);
-                    let _ = fs::create_dir_all(target_path.parent().unwrap());
-                    fs::copy(path, target_path).unwrap();
-                }
-            }
-            statics_copied = true;
-        }
-    }
+        Ok::<_, anyhow::Error>(())
+    })?;
 
     // Write the manifest and info files to the output directory
     fs::write(build_output_dir.join("Cargo.toml"), manifest_bytes)?;
