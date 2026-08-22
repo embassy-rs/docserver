@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs::{self, Metadata};
@@ -106,14 +105,7 @@ impl FlavorProcessor {
                 .re_implementors_list
                 .replace(&res, &b"<div$1 class=\"loaded\">"[..]);
 
-            match res {
-                Cow::Owned(ref res) => fs::write(dest_path, res)?,
-                Cow::Borrowed(_) => {
-                    drop(data); // Drop must occur before modifying file
-
-                    fs::rename(src_path, dest_path)?;
-                }
-            };
+            fs::write(dest_path, res)?;
         } else {
             fs::rename(src_path, dest_path)?;
         };
