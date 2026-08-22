@@ -9,6 +9,10 @@ use serde::Deserialize;
 use crate::commands::build::{BuildArgs, run as build_run};
 use crate::common::CompressionArgs;
 
+/// crates.io requires a User-Agent header on all API requests, otherwise it
+/// returns 403 Forbidden. See https://crates.io/data-access
+const CRATES_IO_USER_AGENT: &str = "docserver (https://docs.embassy.dev)";
+
 #[derive(Deserialize)]
 struct CratesIoResponse {
     versions: Vec<VersionInfo>,
@@ -67,7 +71,7 @@ async fn fetch_crate_versions(crate_name: &str) -> Result<Vec<String>> {
     let url = format!("https://crates.io/api/v1/crates/{}", crate_name);
 
     let mut cmd = Command::new("curl");
-    cmd.args(["-s", "-f", &url]);
+    cmd.args(&["-s", "-f", "-A", CRATES_IO_USER_AGENT, &url]);
 
     let output = cmd.output().context("Failed to execute curl command")?;
 
@@ -187,6 +191,8 @@ async fn build_single_version(
     cmd.args([
         "-L", // Follow redirects
         "-f", // Fail on HTTP error codes
+        "-A",
+        CRATES_IO_USER_AGENT,
         "-o",
         crate_path.to_str().unwrap(),
         &download_url,
