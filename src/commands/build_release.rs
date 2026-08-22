@@ -71,7 +71,7 @@ async fn fetch_crate_versions(crate_name: &str) -> Result<Vec<String>> {
     let url = format!("https://crates.io/api/v1/crates/{}", crate_name);
 
     let mut cmd = Command::new("curl");
-    cmd.args(&["-s", "-f", "-A", CRATES_IO_USER_AGENT, &url]);
+    cmd.args(["-s", "-f", "-A", CRATES_IO_USER_AGENT, &url]);
 
     let output = cmd.output().context("Failed to execute curl command")?;
 
