@@ -306,27 +306,31 @@ impl Thing {
                         if path.len() > 3 && zup.open(&["flavors", flavor]).is_ok() {
                             // if flavor exists, path is wrong, so do 404.
                             return self.resp_404();
-                        } else {
-                            // flavor doesn't exist, redirect to the default flavor.
-                            let cookies = self.cookies(&req);
-
-                            let flavors = self.list_flavors(krate, version)?;
-                            let flavor = cookies
-                                .get(&format!("crate-{}-flavor", krate))
-                                .map(|s| s.as_str());
-                            let mut flavor = flavor.unwrap_or(&flavors[0]);
-                            if flavors.iter().find(|s| *s == flavor).is_none() {
-                                flavor = &flavors[0];
-                            }
-
-                            return self.resp_redirect(&format!(
-                                "/{}/{}/{}/{}",
-                                krate,
-                                version,
-                                flavor,
-                                path[3..].join("/")
-                            ));
                         }
+
+                        // flavor doesn't exist, redirect to the default flavor.
+                        let cookies = self.cookies(&req);
+                        let flavors = self.list_flavors(krate, version)?;
+                        let fallback_flavor = cookies
+                            .get(&format!("crate-{}-flavor", krate))
+                            .map(|s| s.as_str());
+                        let mut fallback_flavor = fallback_flavor.unwrap_or(&flavors[0]);
+                        if flavors.iter().find(|s| *s == fallback_flavor).is_none() {
+                            fallback_flavor = &flavors[0];
+                        }
+
+                        let redir_path = if flavor == "search.index" {
+                            &path[2..]
+                        } else {
+                            &path[3..]
+                        };
+                        return self.resp_redirect(&format!(
+                            "/{}/{}/{}/{}",
+                            krate,
+                            version,
+                            fallback_flavor,
+                            redir_path.join("/")
+                        ));
                     }
                     Err(e) if e.kind() == ErrorKind::IsADirectory => {
                         return self.resp_redirect(&format!(
