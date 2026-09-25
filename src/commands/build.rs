@@ -59,7 +59,7 @@ impl FlavorProcessor {
         let re_fix_root_path = ByteRegex::new(r##"data-root-path="\.\./"##).unwrap();
 
         let re_implementors_list =
-            ByteRegex::new(r#"<div([^>]*\bid="implementors-list"\b[^>]*)>"#).unwrap();
+            ByteRegex::new(r#"<div([^>]*\bid="implementors-list"[^>]*)>"#).unwrap();
 
         Self {
             re_remove_settings,
